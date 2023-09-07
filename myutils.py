@@ -755,3 +755,42 @@ def calculateBasinAverage(da, op='sum', weighting=False):
         else:
             raise ValueError("Invalid option")
 
+def bandpass_filter(daTS):
+    """foward/backward butterworth filter
+    https://dsp.stackexchange.com/questions/41638/forward-backward-filter-scipy-tt-signal-filtfilt-changes-the-amplitude-when
+    """
+    from scipy import signal
+    #assert(type(daTS==xr.core.dataarray.DataArray))
+    print (type(daTS))
+    # implement the 30 Hz low-pass forward-backward filter
+    """
+            fs = 1
+            nyquist = 0.5*fs
+            low_cutoff = 1.0/12
+            print('cutoff= ', 1/low_cutoff*nyquist*5,' days')                    
+            lo_band = low_cutoff/nyquist    
+            b, a = signal.butter(5, lo_band, btype='highpass', fs=fs)
+    """
+    resample_frequency = 1.0
+    lowpass_cutoff = 1/(30/5.0)
+    __nyq = 0.5 * resample_frequency
+    __normal_lowpass_cutoff = lowpass_cutoff / __nyq
+    __order = 5
+    b, a = signal.butter(__order, __normal_lowpass_cutoff, btype='low', fs=resample_frequency)
+    #forward/backward
+    res = signal.filtfilt(b, a, daTS.values)
+
+
+def removeClimatology(da, varname, plotting=False):
+    monthlyMean  = da.groupby("time.month").mean("time",  skipna=True)
+    daDeseasoned = da.groupby("time.month")-monthlyMean
+
+    if plotting:
+        plt.figure()
+        plt.plot(da.values, 'k:')
+        plt.plot(da.values-daDeseasoned.values, 'g')
+        plt.plot(daDeseasoned.values, 'r')
+        plt.savefig(f'test_deseason_{varname}.png')
+        plt.close()
+    return daDeseasoned
+

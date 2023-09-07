@@ -163,6 +163,7 @@ def filterData(da, oldtimes, removeSeason=True, removeTrend=True, filterMethod="
     """
     da.coords['time'] = da.coords['time'].data.astype(np.int64)
     da = da.chunk('auto')
+
     if removeTrend:
         trend = xfit.trend(da,dim='time',type='linear')    
         da = da-trend
@@ -236,7 +237,7 @@ def getTWSDataArrays(region, reLoad=False, maskOcean=True, filtering=True, remov
                 print ('remove seasonal')
                 daInterannual,_,_ = filterData(daCSR, oldtimes, removeSeason=removeSeason, filterMethod=filterMethod)            
             else:
-                daInterannual,_ = filterData(daCSR, oldtimes, removeSeason=removeSeason)            
+                daInterannual,_   = filterData(daCSR, oldtimes, removeSeason=removeSeason)            
 
             bigarr = daInterannual.values
         else:
@@ -353,9 +354,38 @@ def formDataSets(da,mask,toOneDegree=False, genMode='random'):
     else:
         return trainDataset,testDataset,allDataset,scaler
 
+def loadTWS_raw(region, maskOcean=True, csr5d_version=1):    
+    """load mask"""
+    #as0715: this should work for both global and land-only applications
+    #        in the former case, mask is 1 everywhere
+    mask = loadMask()
+    
+    print ("loading original CSR data")
+    #set up nc file names
+    rawncfile = os.path.join(getGraceRoot(),  f'data/globalcsr5d_raw_v{csr5d_version}.nc')
+    #load data with basic cleanup
+    daCSR,oldtimes,timedict = getDataSet(rawncfile)
+    
+    print ('Bypass filtering')
+    bigarr = daCSR.values
+
+    if maskOcean:
+        bigarr = np.einsum('ijk,jk->ijk', bigarr, mask)
+
+    da = xr.DataArray(bigarr,name="lwe_thickness",coords=daCSR.coords,dims=daCSR.dims)
+    lat0,lon0,lat1,lon1 = region    
+    da = da.sel(lon = slice(lon0,lon1), lat= slice(lat0, lat1))    
+    mask = mask.sel(lon = slice(lon0,lon1), lat= slice(lat0, lat1))
+
+    return da,oldtimes
+    
 def main():
     #genNetCDF(version=1)
-    createMyLandMask()
+    #createMyLandMask()
+    from myutils import getRegionExtent
+    region = getRegionExtent(regionName="global")
+    getTWSDataArray_SWE(region=region, maskOcean=True, coarsen=True)
+
     return
     #llcrnrlon=-108.985-1.0; llcrnrlat=24.498131-1.0    
     llcrnrlon =-109; llcrnrlat=24 #the bound of downloaded ERA5 data is 24 to 50

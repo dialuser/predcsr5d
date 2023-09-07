@@ -28,7 +28,7 @@ import rioxarray
 
 #custom package
 from csr5dloader import getTWSDataArrays, filterData
-from climate5dloader import getPrecipData, getWaterVaporData,getMERRA2SoilMoistureData,getGLEAMData,getAirTempData,getSSTData
+from climate5dloader import getPrecipData, getWaterVaporData,getMERRA2SoilMoistureData,getGLEAMData,getAirTempData,getSSTData,getSWEData
 from myutils import scaleDA,reScale,toTensor,getGraceRoot,getGridCellArea
 
 def detrendDA(da):
@@ -61,6 +61,7 @@ def load5ddatasets(region:Tuple, coarsen:bool =True, mask_ocean=True, reLoad=Fal
                     removeSeason=removeSeason, 
                     csr5d_version=csr5d_version) #this has already been detrended in csr5dloader.py
     daCSR5d = daCSR5d.sel(time=slice(f'{startYear}/01/01', f'{endYear}/12/31'))
+
     if coarsen:
         print ('coarsening to 1 degree from 0.25 degree !!!!')
         #landmask = mask.coarsen(lat=4,lon=4,boundary='exact').mean()
@@ -78,6 +79,88 @@ def load5ddatasets(region:Tuple, coarsen:bool =True, mask_ocean=True, reLoad=Fal
         mask = xr.DataArray(arr, name='mask', dims= landmask.dims, coords=landmask.coords )
     print (daCSR5d.shape, mask.shape)
     return daCSR5d,mask,landmask
+
+def doRemoveSWE(daCSR, region, reLoad=False, startYear=2002, endYear=2020):
+    daSWE = loadClimatedatasets(region, vartype='swe', 
+                        daCSR5d= daCSR, 
+                        aggregate5d=True, 
+                        reLoad=reLoad, 
+                        precipSource='era5',
+                        startYear= startYear,
+                        endYear= endYear)
+    #remove mean to form anomalies
+    daSWE_mean = daSWE.sel(time=slice("2004/01/01", "2009/12/31")).mean(dim="time", skipna=True)
+    daSWE = daSWE-daSWE_mean
+    #Note: need to replace nan in swe, otherwise, detrend would not work
+    daSWE = daSWE.fillna(0)
+    daCSR.values = daCSR.values - daSWE.values
+    return daCSR
+
+def loadTWSDataArray_SWE(region, mask_ocean, reLoad=False, startYear=2002, endYear=2019,coarsen=False,
+                        removeSeason=False, csr5d_version=1):
+    from csr5dloader import loadTWS_raw
+
+    if reLoad:
+        #time of daCSR5d0 is in days elapsed
+        daCSR5d0, oldtimes = loadTWS_raw(region, maskOcean=mask_ocean)
+        daCSR5d0['time'] = oldtimes
+
+        if coarsen:
+            print ('coarsening to 1 degree from 0.25 degree !!!!')
+            landmask = xr.open_dataset(os.path.join(getGraceRoot(), 'data/mylandmask.nc'))['LSM'].squeeze()
+            daCSR5d = daCSR5d0.coarsen(lat=4,lon=4,boundary='exact').mean()
+        else:
+            landmask = xr.open_dataset(os.path.join(getGraceRoot(), 'data/mylandmask025deg.nc'))['LSM'].squeeze()
+            daCSR5d = daCSR5d0
+        #04042022, for global using all cells
+        if mask_ocean:
+            mask = landmask
+        else:    
+            #use all cells    
+            arr = np.zeros(landmask.values.shape)+1
+            mask = xr.DataArray(arr, name='mask', dims= landmask.dims, coords=landmask.coords )
+        
+        #truncate the dataarray
+        daCSR5d = daCSR5d.sel(time=slice(f'{startYear}/01/01', f'{endYear}/12/31'))
+
+        #!!!! turn on reLoad to True to reload SWE
+        daCSR5d = doRemoveSWE(daCSR5d, region, reLoad=True, startYear=startYear, endYear=endYear)
+        oldtimes = daCSR5d['time'].values #save the dates
+        #convert to days elapsed
+        csrdays = (pd.to_datetime(oldtimes) - datetime.datetime.strptime('2002-04-01', '%Y-%m-%d')).days 
+        #remove trend
+        #change back to days elapsed
+        daCSR5d['time'] = csrdays
+        #now do detrend
+        daInterannual,_   = filterData(daCSR5d, oldtimes, removeSeason=removeSeason)    
+        daInterannual['time'] = oldtimes            
+
+        bigarr = daInterannual.values
+        if mask_ocean:
+            bigarr = np.einsum('ijk,jk->ijk', bigarr, mask)
+
+        da = xr.DataArray(bigarr,name="lwe_thickness",coords=daCSR5d.coords,dims=daCSR5d.dims)
+        da.coords['time'] = oldtimes
+
+        #upsampling
+        da = da.interp_like(daCSR5d0, method='nearest')
+        #cut time
+        da = da.sel(time=slice(f'{startYear}/01/01', f'{endYear}/12/31'))
+        print ("final tws-swe shape", da.shape)
+        #land only
+        if mask_ocean:
+            if removeSeason:
+                da.to_netcdf(os.path.join(getGraceRoot(), f'data/globalcsr5d_notrend_deseason_swe_v{csr5d_version}.nc'))
+            else:
+                da.to_netcdf(os.path.join(getGraceRoot(), f'data/globalcsr5d_notrend_swe_v{csr5d_version}.nc'))
+    else:
+        #land only
+        if mask_ocean:
+            if removeSeason:
+                da = xr.open_dataset(os.path.join(getGraceRoot(), f'data/globalcsr5d_notrend_deseason_swe_v{csr5d_version}.nc'))['lwe_thickness']
+            else:
+                da = xr.open_dataset(os.path.join(getGraceRoot(), f'data/globalcsr5d_notrend_swe_v{csr5d_version}.nc'))['lwe_thickness']
+    return da
 
 def getCSR5dLikeArray(da, daCSR5d, **kwargs):
     """ Make arrays that have the same length as the CSR5d
@@ -126,7 +209,7 @@ def getCSR5dLikeArray(da, daCSR5d, **kwargs):
     return daNew
 
 def loadClimatedatasets(region:Tuple, vartype:str, daCSR5d, aggregate5d=False, reLoad:bool=True,
-                     precipSource='ERA5',saving=True,startYear=2002, endYear=2020):
+                     precipSource='ERA5',saving=True,startYear=2002, endYear=2019, fake5d=False):
     """
     #get precip data and aggregate according to CSR5d time intervals
     #!!! don't use the simple resample, use getCSR5dLikeArray() instead
@@ -146,14 +229,20 @@ def loadClimatedatasets(region:Tuple, vartype:str, daCSR5d, aggregate5d=False, r
                 kwargs = {"method": "rx5d", "aggmethod": 'sum', 'name':'tp'}       
                 daPrecip = getCSR5dLikeArray(daPrecip, daCSR5d, **kwargs)
                 if saving:
-                    daPrecip.to_netcdf(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P5d.nc'))
+                    if not fake5d:
+                        daPrecip.to_netcdf(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P5d.nc'))
+                    else:
+                        daPrecip.to_netcdf(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P5d_fake5d.nc'))
             else:                                
                 daPrecip['time'] =daPrecip.indexes['time'].to_datetimeindex()
-                if saving:
+                if saving:                    
                     daPrecip.to_netcdf(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P1d.nc'))
         else:
             if aggregate5d:
-                daPrecip = xr.open_dataset(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P5d.nc'))
+                if not fake5d:
+                    daPrecip = xr.open_dataset(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P5d.nc'))
+                else:
+                    daPrecip = xr.open_dataset(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P5d_fake5d.nc'))
             else:
                 daPrecip = xr.open_dataset(os.path.join(getGraceRoot(), f'data/{dirmap[precipSource]}/{dirmap[precipSource]}_P1d.nc'))
                 daPrecip = daPrecip.rename({'precipitationCal':'tp'})
@@ -200,6 +289,39 @@ def loadClimatedatasets(region:Tuple, vartype:str, daCSR5d, aggregate5d=False, r
                 ds = xr.open_dataset(os.path.join(getGraceRoot(), 'data/era5/sst_1d.nc'))
             daSST = ds['sst']
         return daSST  
+    elif vartype == 'swe':
+        if reLoad:
+            daSWE = getSWEData(region, source='era5', aggregateTo5d= False, startYear=2002, endYear=2020)
+
+            if aggregate5d:
+                #for air temperature we want 5-day average values
+                kwargs = {"method": "rx5d", "aggmethod": 'average', 'name': 'sd'}
+                daSWE = getCSR5dLikeArray(daSWE, daCSR5d, **kwargs)
+                if saving:
+                    if not fake5d:
+                        daSWE.to_netcdf(os.path.join(getGraceRoot(), 'data/era5/swe_5d.nc'))
+                    else:
+                        daSWE.to_netcdf(os.path.join(getGraceRoot(), 'data/era5/swe_fake5d.nc'))
+            else:
+                if saving:
+                    if not fake5d:
+                        daSWE.to_netcdf(os.path.join(getGraceRoot(), 'data/era5/swe_1d.nc'))          
+                    else:
+                        daSWE.to_netcdf(os.path.join(getGraceRoot(), 'data/era5/swe_fake1d.nc'))          
+        else:
+            if aggregate5d:
+                if not fake5d:
+                    ds = xr.open_dataset(os.path.join(getGraceRoot(), 'data/era5/swe_5d.nc'))
+                else:
+                    ds = xr.open_dataset(os.path.join(getGraceRoot(), 'data/era5/swe_fake5d.nc'))
+            else:
+                if not fake5d:
+                    ds = xr.open_dataset(os.path.join(getGraceRoot(), 'data/era5/swe_1d.nc'))
+                else:
+                    ds = xr.open_dataset(os.path.join(getGraceRoot(), 'data/era5/swe_fake1d.nc'))
+
+            daSWE = ds['sd']
+        return daSWE
 
     elif vartype == 'watervapor':
         if reLoad:
@@ -930,6 +1052,12 @@ class SNPGenerator(DataGenerator):
         return trainLoader,testLoader
 
 def main():
+    from myutils import getRegionExtent
+    region = getRegionExtent('global')
+    loadTWSDataArray_SWE(region, mask_ocean=True, reLoad=True, startYear=2002, endYear=2019,coarsen=True,
+                            removeSeason=False, csr5d_version=1)
+
+    return
     llcrnrlon =-109; llcrnrlat=24 #the bound of downloaded ERA5 data is 24 to 50
     blocksize = 64
     cellsize  = 0.25

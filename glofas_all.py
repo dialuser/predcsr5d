@@ -316,7 +316,13 @@ def plotBivariate(cfg, use_percentile=False):
         ax.spines[axis].set_linewidth(1.5) 
 
     #outputDict = pkl.load(open(f'grdcresults/GLOFAS_all_{cfg.event.cutoff}.pkl', 'rb'))            
-    outputDict2 = pkl.load(open(f'grdcresults/glofas_all_events.pkl', 'rb'))
+    #outputDict2 = pkl.load(open(f'grdcresults/glofas_all_events.pkl', 'rb'))
+    if cfg.data.removeSWE:
+        swe='swe'
+    else:
+        swe=""
+
+    outputDict2 = pkl.load(open(f'grdcresults/glofas_{cfg.event.event_method}_all_events{swe}.pkl', 'rb'))
     validStations = list(outputDict2.keys())
     print(len(validStations))
     cmi=[]
@@ -401,6 +407,6 @@ if __name__ == '__main__':
         #generate global glofas metrics
         main(config, reGen=reGen)
     elif itask == 2:
-        #figure 2A, plot bivariate plot for GLOFAS
+        #figure 4, plot bivariate plot for GLOFAS
         plotBivariate(config)
 

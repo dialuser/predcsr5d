@@ -388,6 +388,30 @@ def getPrecipData(regionExtents,source, aggregateTo5d=True,startYear=2002, endYe
     daPrecip = daPrecip.transpose("time","lat","lon")
     return daPrecip
 
+def getSWEData(regionExtents,source, aggregateTo5d=True,startYear=2002, endYear=2020):
+    """Get 5d data
+    aggregateTo5d: aggregate data to match with csr5d    
+    """
+    assert (source in ['era5'])
+    rootDataDir = getGraceRoot()
+    swe_ncfile = os.path.join(rootDataDir, 'data/era5_swe_2002_2022_daily.nc')
+
+    daSWE = xr.open_dataset(swe_ncfile)['sd']
+    daSWE = daSWE.sel(time=slice('{0:4d}/01/01'.format(startYear), '{0:4d}/12/31'.format(endYear)))    
+
+    if aggregateTo5d:
+        daSWE = resampleDaily(daSWE,rule='mean')    
+
+    if 'longitude' in daSWE.dims:
+        daSWE = daSWE.rename({'longitude':'lon', 'latitude':'lat'})
+    #swap the order of coords
+    daSWE = daSWE.transpose("time","lat","lon")
+    #convert to cm from m swe
+    print ('convert from m to cm')
+    daSWE = daSWE*100.0
+    return daSWE
+
+
 def getWaterVaporData(regionExtents, startYear=2002, endYear=2020):
     """water vapor data
     """
