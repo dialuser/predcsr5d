@@ -11,11 +11,13 @@ This repository includes scripts for generating results in our 2024 GRL paper, [
 - `parseYangtze.py`:   Parse Yangtze station data into GRDC format
 
 **Analyses**
-- `grdc.py`: Code for CSR.5d analysis. This generates Figures 1, 2,3 and Figure S1, S3 in the paper
-- `grdc_monthly5d.py`: Code for upsampled CSR.monthly analysis (linearly interpolated to the same 5-day intervals as CSR.5d). This generates Figure S2 in the paper
+- `grdc.py`: Main code for CSR.5d analysis. This generates Figures 1, 2,3 and Figure S1, S3 in the paper
+- `grdc_monthly5d.py`: Main code for upsampled CSR.monthly analysis (linearly interpolated to the same 5-day intervals as CSR.5d). This generates Figure S2 in the paper
 
 **Utility functions**
 - `myutils.py`: Various utility functions
+- `dataloader_global.py`, `csr5dloader.py`: data loading and pre-processing functions
+- `glofas_all_new.py`: code for extracting GloFAS flow series from GRDC gage locations
 
 ### Dependencies
 
