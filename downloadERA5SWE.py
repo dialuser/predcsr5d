@@ -1,8 +1,9 @@
-#author: Alex Sun
-#date: 0801
-#purpose: download swe data
-#swe product comparison paper https://tc.copernicus.org/articles/14/1579/2020/tc-14-1579-2020.pdf
-
+#Author: Alex Sun
+#Date: 0801
+#Purpose: download ERA5 SWE data from CDS portal
+#Requirements: 
+#  - cdsapi
+#=================================================================================================
 import os
 import cdsapi
 import xarray as xr
@@ -10,7 +11,7 @@ from calendar import monthrange
 from subprocess import call
 import glob
 
-#fileroot = '/scratch/02248/alexsund/glofas'
+#set download folder
 fileroot = '/home/suna/work/grace/data/era5/swe'
 dailyfileroot = '/home/suna/work/grace/data/era5/swe/daily'
 
@@ -85,6 +86,7 @@ def concatDailyFiles():
     combined.to_netcdf('era5_swe_2002_2022_daily_025.nc')
     print ('time elapsed ', time.time()-starttime)        
 
-if __name__ == '__main__':    
-    #downloadERA5SWE(2002, 2022)
+if __name__ == '__main__':  
+
+    downloadERA5SWE(2002, 2022)
     concatDailyFiles()

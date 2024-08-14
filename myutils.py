@@ -9,6 +9,8 @@ import numpy as np
 import xarray as xr
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+from sklearn.preprocessing import PowerTransformer
+from sklearn.linear_model import LinearRegression
 
 from datetime import timedelta
 import pandas as pd
@@ -17,6 +19,9 @@ import sys,os
 import yaml
 from attrdict import AttrDict
 import rioxarray
+import calendar
+from generativepy.color import Color
+from matplotlib.colors import rgb2hex
 
 def from_numpy_to_var(npx, dtype='float32'):
     var = Variable(torch.from_numpy(npx.astype(dtype)))
@@ -794,3 +799,283 @@ def removeClimatology(da, varname, plotting=False):
         plt.close()
     return daDeseasoned
 
+def getExtremeEvents(series, method='MAF', cutoff=90, transform=False, minDist=None, 
+                     season=None, returnExtremeSeries=False):
+    """   
+    Params
+    ------
+    series, input dataframe
+    method: MAF, mean annual flood; POT peak over threshold 
+    cutoff: this is only used by POT
+    minDist: minimum distance betweeen conseq events
+    season: if None, restrict to season
+    returnExtremeSeries: True to return time series
+    """
+    #transform variable to normal space [this operates on normal anomalies,]
+    if transform:
+        val = PowerTransformer().fit_transform(series.to_numpy()[:,np.newaxis]).squeeze()
+        series = pd.Series(val, index=series.index)
+
+    if method == 'MAF':
+        #the following 2 lines extracted annual maxima w/o enforcing minDist
+        #extremes = series.groupby(series.index.year).agg(['idxmax', 'max'])  
+        #extremes = pd.Series(extremes['max'].values, index=extremes['idxmax'])
+        #asun0711, enforce minimum distance between events
+        nEvent = 5   #assuming five alternative maxima are enough
+        extremes = series.groupby(series.index.year).nlargest(nEvent)
+        extremes = extremes.reset_index(level=[0,1])  #flatten the multi-index      
+        extremes = pd.Series(extremes[0].values, index=extremes['level_1'])
+        
+        #check the distance between events
+        if not minDist is None:
+            #remove close events
+            nYears = len(series.index.year.unique())
+            goodInd = [0]
+            counter = 0
+            for i in range(1, nYears):
+                for j in range(nEvent):
+                    #test each event in each year against the maxima from the prev year
+                    if np.abs(extremes.index[i*nEvent+j] - extremes.index[goodInd[counter]]).days>minDist:                    
+                        goodInd.append(i*nEvent+j)
+                        counter+=1
+                        break
+                    elif j==nEvent-1:
+                        #this should not be reached
+                        raise ValueError('cannot find events ')            
+            extremes = extremes.iloc[goodInd]      
+
+    elif method == 'POT':
+        #POT
+        thresh = np.nanpercentile(series.to_numpy(), cutoff)
+        #asun 08032023
+        #I want to make sure  the largest events are selected        
+        extremes = series.loc[series>=thresh]
+        extremes = extremes.sort_values(ascending=False)
+
+        if not minDist is None:
+            #remove close events
+            goodInd = [0]
+            for i in range(1, extremes.shape[0]):
+                flag=False
+                for j in range(0, i):
+                    if np.abs((extremes.index[i] - extremes.index[j]).days)<minDist:
+                        flag=True
+                if not flag:
+                    goodInd.append(j)
+            extremes = extremes.iloc[goodInd]                            
+
+        if not season is None:
+            #note season is zero-based
+            if season == 'DJF':
+                monrng = [11,0,1]
+            elif season == 'MAM':
+                monrng = [2,3,4]
+            elif season == 'JJA':
+                monrng = [5,6,7]
+            elif season == 'SON':
+                monrng = [8,9,10]
+            elif season == 'MAMJJA':
+                monrng = [2,3,4,5,6,7]                
+            elif season == 'AMJJAS':
+                monrng = [3,4,5,6,7,8]                
+            else:
+                raise ValueError("wrong season code")
+            extremes = extremes[extremes.index.month.isin(monrng)]            
+            print ('POT: num events extracted', len(extremes), '@ cutoff', cutoff, 'for season', season)
+        else:
+            print ('POT: num events extracted', len(extremes), '@ cutoff', cutoff)
+        print ('*'*80)        
+    else: 
+        raise ValueError("invalid method")
+
+    events = np.zeros((series.size),dtype=int)
+    #drop bad data
+    extremes = extremes.dropna()
+    
+    #for binary event series
+    for ix, item in enumerate(series.index.tolist()):
+        for time2 in extremes.index.tolist():
+            if item==time2:
+                events[ix] = 1
+    #print a warning if the number annual maxima in events is not the same as the total number of years
+    if len(np.where(events==1)[0]) != extremes.size:
+        print ("warning:", len(np.where(events==1)[0]), extremes.size)
+    print ('+++++++++++++++++++extremes ', extremes.size)
+    if returnExtremeSeries:
+        return events, extremes
+    else:
+        return events
+
+def getCompoundEvents(cfg, daQ, daP, daTWS, daFPI=None, returnTS=False):
+    """Get compound events
+    Two modes
+    returnTS, if True time series for scatter plots; otherwise, return dict for compound event analysis    
+    """
+    #=============start extreme event analysis============
+    def removeBadYears(da):
+        da1 = da.sel(time=slice(cfg.data.start_date, '2016/12/31'))
+        da2 = da.sel(time=slice('2019/01/01', cfg.data.end_date))
+        da = xr.concat([da1,da2], dim='time')
+        return da
+
+    def calculateProb(ts1,ts2):
+        nEvents = 0
+        for ix, time1 in enumerate(ts1.index.tolist()):
+            for iy, time2 in enumerate(ts2.index.tolist()):
+                dt = (time1-time2).days
+                if abs(dt)<=cfg.event.t_win:
+                    nEvents+=1
+        return nEvents
+
+    def genTS(arrIn, K, V):
+        #generate time series for 5-day uniform intervals
+        arrOut = np.zeros(daterng.shape) + np.NaN
+        arrOut[K] = arrIn[V]
+        return arrOut
+
+    eventMethod = cfg.event.event_method
+    if eventMethod == 'POT':
+        cutoff = cfg.event.cutoff
+    else:
+        cutoff = None
+    
+    daQ = removeBadYears(daQ)
+    daP = removeBadYears(daP)
+    daTWS = removeBadYears(daTWS)
+
+
+    timestamps = daQ.time.values
+    min_dist = cfg.event.t_win
+
+    #as 07/11/2023, change Q, TWS, and P to uniform 5-day intervals
+    daterng = pd.date_range(start=timestamps[0], end=timestamps[-1], freq='5D')    
+    #get key/value pairs to map from daterng to timestamps
+    TWS = daTWS.values
+    P = daP.values
+    Q = daQ.values
+    if not daFPI is None:
+        FPI = daFPI.values
+    K = []
+    V = []
+    for iy, t1 in enumerate(timestamps):
+        for ix, t2 in enumerate(daterng):
+            if abs((t1-t2).days)<3.0 and ~np.isnan(Q[iy]):
+                K.append(ix)
+                V.append(iy)  
+                break        
+    K = np.array(K)
+    V = np.array(V)
+    #assign values to 5-day dates, missing values are indicated by NaN
+    TWS = genTS(TWS, K, V)
+    P = genTS(P, K, V)     
+    Q = genTS(Q, K, V)
+    if not daFPI is None:
+        FPI = genTS(FPI, K, V)
+
+    print ('Q len', Q.shape, len(daterng))
+    q_events, tsQ   = getExtremeEvents(pd.Series(Q.squeeze(), index=daterng), method=eventMethod, cutoff=cutoff, minDist=min_dist, transform=False, returnExtremeSeries=True)        
+    tws_events,tsTWS  = getExtremeEvents(pd.Series(TWS.squeeze(), index=daterng), method=eventMethod, cutoff=cutoff, minDist=min_dist, transform=False, returnExtremeSeries=True)
+    p_events, tsP   = getExtremeEvents(pd.Series(P.squeeze(), index=daterng), method=eventMethod, cutoff=cutoff, minDist=min_dist,transform=False,  returnExtremeSeries=True)
+    if not daFPI is None:
+        _, tsFPI = getExtremeEvents(pd.Series(FPI.squeeze(), index=daterng), method=eventMethod, cutoff=cutoff, minDist=min_dist,transform=False,  returnExtremeSeries=True)
+            
+    #find co-occurrence
+    #note tsQ and tsTWS only have extreme events in it
+    #
+    TWS_Q =  calculateProb(tsQ, tsTWS)
+    P_Q   =  calculateProb(tsQ, tsP)
+    #print ('Joint TWS_Q', TWS_Q, ' Joint P_Q ', P_Q)
+    p_TWS_Q =  TWS_Q /len(tsQ)
+    p_P_Q   =  P_Q /len(tsQ)
+    SI_TWS = getSeasonalityIndex(tsTWS)
+    SI_P = getSeasonalityIndex(tsP)
+    SI_Q = getSeasonalityIndex(tsQ)
+    if not daFPI is None:            
+        SI_FPI = getSeasonalityIndex(tsFPI)
+    else:
+        SI_FPI = 0.0
+    if not returnTS:
+        return {'TWS':p_TWS_Q, 'P': p_P_Q, 
+                'SI_TWS': SI_TWS, 'SI_P': SI_P, 
+                'SI_Q': SI_Q,
+                'SI_FPI': SI_FPI,
+                'tsQ':tsQ, 'tsTWS':tsTWS, 'tsP':tsP}
+    else:
+        return {'q_events':q_events, 'tws_events':tws_events, 
+                'p_events':p_events, 'timestamp':daterng, 
+                'TWS':TWS.squeeze(), 'Q': Q.squeeze()}
+def getSeasonalityIndex(ts):
+    """Calcualte seasonality index
+    cf: https://journals.ametsoc.org/view/journals/hydr/18/7/jhm-d-16-0207_1.xml
+    """
+    event_dates = ts.index.values
+    theta=[]
+    for item in event_dates:
+        #get day of the year
+        adate = pd.to_datetime(item)
+        day_of_year = adate.timetuple().tm_yday
+        year = adate.year
+        days_in_year = 365 + calendar.isleap(year)
+        theta.append(day_of_year*(np.pi*2/days_in_year))
+    theta = np.array(theta)
+    xbar = np.mean(np.cos(theta))
+    ybar = np.mean(np.sin(theta))
+    theta_bar = np.arctan(ybar/xbar)
+    SI = np.sqrt(xbar*xbar+ybar*ybar)
+    mean_date = theta_bar*np.pi*2/365
+    return SI
+
+
+
+def hex_to_Color(hexcode):
+    from PIL import ImageColor
+
+    ### function to convert hex color to rgb to Color object (generativepy package)
+    rgb = ImageColor.getcolor(hexcode, 'RGB')
+    rgb = [v/256 for v in rgb]
+    rgb = Color(*rgb)
+    return rgb
+
+def genColorList(num_grps):
+    ### get corner colors from https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/
+    # c00 = hex_to_Color('#D5F5E3') #light green
+    # c10 = hex_to_Color('#58D68D') #deep green 
+    # c01 = hex_to_Color('#F1948A') #light orange
+    # c11 = hex_to_Color('#E74C3C')
+    #source: colorbrewer: https://colorbrewer2.org/#type=sequential&scheme=YlOrBr&n=4
+    c00 = hex_to_Color('#edf8fb') #light green
+    c10 = hex_to_Color('#238443') #deep green 
+    #c01 = hex_to_Color('#d7b5d8') #light orange
+    #c01 = hex_to_Color('#fbb4b9') #light orange
+    #c11 = hex_to_Color('#ae017e') #red
+    c01 = hex_to_Color('#FF0000')  #red
+    c11 = hex_to_Color('#000000')  #black
+
+
+    ### now create square grid of colors, using color interpolation from generativepy package
+    c00_to_c10 = []
+    c01_to_c11 = []
+    colorlist  = []
+    for i in range(num_grps):
+        c00_to_c10.append(c00.lerp(c10, 1/(num_grps-1) * i))
+        c01_to_c11.append(c01.lerp(c11, 1/(num_grps-1) * i))
+    
+    for i in range(num_grps):
+        for j in range(num_grps):
+            colorlist.append(c00_to_c10[i].lerp(c01_to_c11[i], 1/(num_grps-1) * j))
+    
+    ### convert back to hex color
+    colorlist = [rgb2hex([c.r, c.g, c.b]) for c in colorlist]
+
+    ### manually override the upright corner color
+    #colorlist[-1] = '#E74C3C'
+    return colorlist
+
+def genSingleColorList(num_grps):
+    c01 = hex_to_Color('#F1948A') #light orange
+    c11 = hex_to_Color('#E74C3C')
+    colorlist  = []
+    for i in range(num_grps):
+        colorlist.append(c01.lerp(c11, 1/(num_grps-1) * i))
+    colorlist = [rgb2hex([c.r, c.g, c.b]) for c in colorlist]
+    return colorlist

@@ -1,13 +1,13 @@
-#author: Alex Sun
-#date: 06262023
-#purpose: download glofas reanalysis data
+#Author: Alex Sun
+#Date: 06262023
+#Purpose: download glofas reanalysis data
 #====================================================================================
 import os
 import cdsapi
 
-#fileroot = '/scratch/02248/alexsund/glofas'
+#set folder for data
 fileroot = 'data/glofas'
-def downloadGloFAS(startYear, endYear):
+def downloadGloFAS(startYear, endYear, region_name, region_box):
     c = cdsapi.Client()
 
     for iyear in range(startYear, endYear+1):
@@ -39,18 +39,19 @@ def downloadGloFAS(startYear, endYear):
                     '28', '29', '30',
                     '31',
                 ],
-                'area': [
-                    # north, west, south, east
-                    #60, -130, 15,-40,   #north america
-                    #10, -85, -55,  -40   #south america
-                    #20, -15, -40,  60     #africa
-                    70,  -10,   35, 60     #europe
-                    #60, 30, 8, 145     #asia
-                    #-10, 110, -40, 160     #australia
-
-                ],                
+                'area': region_box,                
             },
-            os.path.join(fileroot, f'glofasv40_{iyear}_eu.grib'))
+            os.path.join(fileroot, f'glofasv40_{iyear}_{region_name}.grib'))
 
 if __name__ == '__main__':    
-    downloadGloFAS(2013, 2021)
+    # north, west, south, east
+    regions={
+        'na': [60, -130, 15,-40],
+        'sa': [10, -85, -55,  -40],
+        'af': [20, -15, -40,  60],
+        'eu': [70,  -10,   35, 60],
+        'as': [60, 30, 8, 145],
+        'au': [-10, 110, -40, 160 ]
+    }
+    for key in regions.keys():
+        downloadGloFAS(2002, 2021, region_name=key, region_box=regions[key])

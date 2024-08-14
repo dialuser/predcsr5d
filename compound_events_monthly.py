@@ -4,6 +4,7 @@
 #date: 07232023, not using LMF, revised JRP calculation
 #                added SI FPI implementation
 #date: 08012023, modify for monthly experiments
+#date: 09192023, modify to add yangtze river data
 #========================================================================================
 import pandas as pd
 import numpy as np
@@ -207,7 +208,7 @@ def compound_events_analysis(cfg, region, plotStations=False):
 
 
                     resDict = getCompoundEvents(cfg, daQ, basinP, basinTWS)
-                    
+
                     if plotStations:
                         #as0715, generate station event plots
                         fig = plt.figure(figsize=(8,6))
@@ -241,10 +242,10 @@ def compound_events_analysis(cfg, region, plotStations=False):
 
                         plt.savefig(f'outputs/qplot_{stationID}.png')
                         plt.close()
-
-                    print (stationID, riverName, resDict['SI_Q'])
+                    
                     allEvents[stationID] = resDict       
-
+                    print (stationID, allEvents[stationID]['TWS'], allEvents[stationID]['P'])
+                    
             except Exception as e: 
                 raise Exception (e)
         if not cfg.data.deseason:
@@ -501,7 +502,32 @@ def getCompoundEventCopula(cfg, daQ, daP, daTWS):
         else:
             return {'TWS':p_TWS_Q, 'P': p_P_Q, 'esTWS': tsTWS, 'esQ': tsQ, 'esP':tsP}
 
+def checkMonthlyand5d(cfg):
+    """asun: 10/30/2023
+    Check monthly events against 5d events to see if the precip co-occurrences are the same    
+    Note monthly data are in 5d intervals, that's why 5d P-Q and monthly P-Q are the same
+    """
+    with open('test_monthlyevents.txt', 'w') as fid:
+        for region in cfg.data.regions:
+            allEvents_Monthly = pkl.load(open(f'grdcresults/{region}_all_events_monthly.pkl', 'rb'))             
+            for key in allEvents_Monthly.keys():
+                fid.write(f"{key}, {allEvents_Monthly[key]['TWS']}, {allEvents_Monthly[key]['P']}\n")
+    
+    with open('test_5devents.txt', 'w') as fid:
+        for region in cfg.data.regions:
+            allEvents_5d = pkl.load(open(f'grdcresults/{region}_MAF_all_eventsswe.pkl', 'rb'))     
+            for key in allEvents_5d.keys():
+                fid.write(f"{key}, {allEvents_5d[key]['TWS']}, {allEvents_5d[key]['P']}\n")
+
+
+
+
 if __name__ == '__main__':    
+    """
+    itask =1, generate CSR.monthly (linearly interpolated to 5d), GRDC compound event analysis (P, TWS, and Q) data for plotting Figure 1 
+    itask =2, generate CSR.monthly (linearly interpolated to 5d), Glofas compound event analysis data (P, TWS, and Q), not used
+
+    """
     from myutils import load_config
     config = load_config('config.yaml')
     
@@ -516,9 +542,12 @@ if __name__ == '__main__':
             compound_events_analysis(cfg=config, region=region, plotStations=False)
     elif itask == 2:
         #do compound event analysis for glofas [this is not used anymore]
-        #so far I only downloaded NA data
         glofas_compound_events_analysis(cfg=config, region="north_america")
 
     elif itask == 5:
         #figure 2
         glofas_compound_events_analysis_global(config)
+    
+    elif itask == 6:
+        #asun10302023, compare 5d to monthly events
+        checkMonthlyand5d(config)

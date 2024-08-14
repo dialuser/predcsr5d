@@ -133,7 +133,7 @@ def convertMonthlyTo5d(cfg):
     region = getRegionExtent(regionName='global')
     #
     da, mask = getTWSDataArrays(region=region, reLoad=cfg.monthly.reload, maskOcean=True, deseason=cfg.monthly.remove_season)
-    
+    print ('here', da.time)
     #do interpolation    
     da_5d = da.resample(time="5D").interpolate("linear")
     #slice the data
@@ -147,6 +147,7 @@ def loadFake5ddatasets(cfg, region:Tuple, coarsen:bool =True, mask_ocean=True, s
     coarsen, true to coarsen the grid (currently default to 1x1)
     crs5d_version, version of csr5d data
     """    
+    print ('before...')
     daFakeCSR5d, mask = convertMonthlyTo5d(cfg)
     if coarsen:
         print ('coarsening to 1 degree from 0.25 degree !!!!')
@@ -219,12 +220,14 @@ def loadFake5ddatasetsNoSWE(cfg,  region:Tuple, reLoad:bool = False, coarsen:boo
     region: coordinates of the region
     """
     from csr_monthly_dataloader import getTWSDataArraysRaw
-    
+
     if reLoad:
-        #time of daCSR5d0 is in days elapsed
+        #time of daCSR5d0 is in days elapsed [data starts from 4/18/2002]
+        #monthly raw data
         daCSR0, oldtimes = getTWSDataArraysRaw(region, maskOcean=mask_ocean)
         daCSR0['time'] = oldtimes #restore datetime
         if coarsen:
+            #this is needed for the climate data masking
             print ('coarsening to 1 degree from 0.25 degree !!!!')
             landmask = xr.open_dataset(os.path.join(getGraceRoot(), 'data/mylandmask.nc'))['LSM'].squeeze()
             daCSR = daCSR0.coarsen(lat=4,lon=4,boundary='exact').mean()
@@ -240,12 +243,16 @@ def loadFake5ddatasetsNoSWE(cfg,  region:Tuple, reLoad:bool = False, coarsen:boo
             arr = np.zeros(landmask.values.shape)+1
             mask = xr.DataArray(arr, name='mask', dims= landmask.dims, coords=landmask.coords )
 
-        #Convert to 5d through linear interpolation
-        da_fake5d = daCSR.resample(time="5D").interpolate("linear")
-        oldtimes = da_fake5d.time.values #record the datetimes
-        #remove SWE
-        da_fake5d = doRemoveSWE(da_fake5d, region, reLoad=True, startYear=2002, endYear=2020)
+        #Convert to 1d through linear interpolation
+        da_fake5d = daCSR.resample(time="1D").interpolate("linear")
+        #asun10/30/2023, load csr5d data to get the exact dates
+        daCSR5d = xr.open_dataset(os.path.join(getGraceRoot(), 'data/globalcsr5d_notrend_swe_v1.nc'))['lwe_thickness']
+        csr5d_dates = daCSR5d['time']
+        da_fake5d = da_fake5d.sel(time=csr5d_dates)
 
+        #remove SWE
+        oldtimes = da_fake5d.time.values #record the datetimes
+        da_fake5d = doRemoveSWE(da_fake5d, region, reLoad=True, startYear=2002, endYear=2020)
         #remove linear trend
         #first convert dates to days elapsed since 2002/04/01
         days_elapsed = (pd.to_datetime(oldtimes) - datetime.strptime('2002-04-01', '%Y-%m-%d')).days
@@ -259,17 +266,18 @@ def loadFake5ddatasetsNoSWE(cfg,  region:Tuple, reLoad:bool = False, coarsen:boo
         if mask_ocean:
             bigarr = np.einsum('ijk,jk->ijk', bigarr, mask)
         da = xr.DataArray(bigarr,name="lwe_thickness",coords=daInterannual.coords,dims=daInterannual.dims)
-        #upsampling to 0.25x0.25
+        #upsampling to 0.25x0.25 
+        #[10/30/2023, comment this out when coarsen is false ]
         da = da.interp(coords={'lat':daCSR0.lat, 'lon':daCSR0.lon, 'time':da.time}, method='nearest')
         #slice time period
         da = da.sel(time=slice(f'{startYear}/01/01', f'{endYear}/12/31'))
-        print (da.shape)
+        print ('monthly faked5d data final shape', da.shape)
         #land only
         if mask_ocean:
-            da.to_netcdf(os.path.join(getGraceRoot(), f'data/globalcsr5d_notrend_swe.nc'))
+            da.to_netcdf(os.path.join(getGraceRoot(), f'data/globalcsrfake5d_notrend_swe.nc'))
     else:
         if mask_ocean:
-            da = xr.open_dataset(os.path.join(getGraceRoot(), f'data/globalcsr5d_notrend_swe.nc'))['lwe_thickness']
+            da = xr.open_dataset(os.path.join(getGraceRoot(), f'data/globalcsrfake5d_notrend_swe.nc'))['lwe_thickness']
     return da
 
 if __name__ == '__main__':

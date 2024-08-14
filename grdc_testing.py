@@ -17,8 +17,7 @@
 #rev date: 08052023, implemented SWE removal  set cfg.data.removeSWE to True in config.yaml
 #rev date: 08072023, fixed bug in doSWERemoval, should use anomaly by subtracting mean SWE
 #rev date: 09062023, revise to add two stations on yangtze river
-#Requirements [can be installed via pip]
-#  rioxarray, cartopy, hydrostats, shapely, statsmodels, seaborn, tigramite
+#rev date: 03242024, testing sensitivity to data.year_threshold 
 #=======================================================================================================
 import pandas as pd
 import os,sys
@@ -85,7 +84,7 @@ hydroshedMaps={
 }
 #number of neighbors for CMI
 KNN = 6
-#BASIN AREA in [km^2]
+#BASIN AREA
 MIN_BASIN_AREA = 1.2e5
 
 def getBasinMask(stationID, region='north_america', gdf=None):    
@@ -376,6 +375,7 @@ def getCMI(cfg, stationID, df, river=None, saveDataFrame=False):
     #note: tigramite requires array to have X, Y, Z in rows and observations in columns
     xyz = np.array([0, 1, 2],dtype=int)
     cmi_knn_score = cmi_knn.get_dependence_measure(arr, xyz=xyz)
+    #p_val = cmi_knn.get_shuffle_significance(arr, xyz=xyz, value=cmi_knn_score)
     
     # ==== Uncomment the following to do causal graph plot=======
     # if plotting:
@@ -465,6 +465,12 @@ def doCausalAnalytics(cfg, df, binary=False):
     for ivar in [1,2]:   
         for ilag in range(tau_min, tau_max+1):
             selected_links[ivar][(ivar, -ilag)]='-?>'
+
+    # #add undirected links at time =0 
+    # for ivar in [0,1]:
+    #     for jvar in [1,2]:
+    #         if ivar!=jvar:
+    #             selected_links[ivar][(jvar, 0)]='o?o'
 
     pc_alpha = 0.1
     alpha_level = 0.05
@@ -1416,7 +1422,6 @@ def main(cfg, region):
     region, the region to be analyzed
     """    
     gdf = getCatalog(region)
-    print (gdf)
     dfStation = getStationMeta(gdf)
     reGen = cfg.regen
     if cfg.data.removeSWE:
@@ -1431,6 +1436,7 @@ def main(cfg, region):
         
         #print ("stationid,lat,lon,river,area,data_coverage")
         goodStations=0
+        validStation={}
         for ix, row in dfStation.iterrows():
             stationID = row['grdc_no']
 
@@ -1446,66 +1452,74 @@ def main(cfg, region):
                 #count number of valid values in each year in fractions (not percent !!!!)
                 res = df.groupby(df.index.year).agg({'count'})/365.0
                 resdf = res['Q']
+
+                #AS: 0324, find valid years that has completeness greater than 0.75
+                resdfValid = resdf[resdf['count']>=0.75]                
+
                 #find completeness in each valid gages should have empty resdf
                 resdf = resdf[resdf['count']<cfg.data.year_threshold]
-
+                
                 #only process gages have sufficient number of data and big enough area
                 if resdf.empty and row['area_hys']>=cfg.data.min_basin_area:
+                    #AS: 0324: record number of valid years
+                    validStation[stationID] = resdfValid.shape[0]
+
                     #print (stationID, row['river_x'])
                     goodStations+=1
-                    #drop NaN
-                    df = df.dropna()
-                    #06262023, normalize by drainage area
-                    daQ = xr.DataArray(data=df['Q'].values/row['area_hys'], dims=['time'], coords={'time':df.index})
-                    if xds is None:
-                        #only store xds on first call
-                        basinTWS, basinP, xds, xds_Precip = getBasinData(config=cfg, 
-                                                            stationID=stationID, 
-                                                            lat=lat, lon=lon, gdf=gdf, 
-                                                            region=region,
-                                                            removeSWE=cfg.data.removeSWE
-                                                            )
-                    else:
-                        basinTWS, basinP, _, _ = getBasinData(config=cfg, 
-                                                            stationID=stationID, 
-                                                            region=region, gdf=gdf, lat=lat, lon=lon, 
-                                                            xds=xds, xds_Precip=xds_Precip,
-                                                            removeSWE=cfg.data.removeSWE)
-                    #08042023, choose between max or sum
-                    aggmethod = 'max'
-                    if aggmethod =='sum':
-                        kwargs = {
-                            "method": "rx5d",
-                            "aggmethod":'sum',
-                            "name":'Q'
-                            }
-                        #convert Q to CSR5d intervals
-                        #this steps may introduce NaN values
-                        daQ = getCSR5dLikeArray(daQ, basinTWS, **kwargs)*86400
-                    else:
-                        kwargs = {
-                            "method": "rx5d",
-                            "aggmethod":'max',
-                            "name":'Q'
-                            }
-                        #convert Q to CSR5d intervals
-                        #this steps may introduce NaN values
-                        daQ = getCSR5dLikeArray(daQ, basinTWS, **kwargs)
+                    # #drop NaN
+                    # df = df.dropna()
+                    # #06262023, normalize by drainage area
+                    # daQ = xr.DataArray(data=df['Q'].values/row['area_hys'], dims=['time'], coords={'time':df.index})
+                    # if xds is None:
+                    #     #only store xds on first call
+                    #     basinTWS, basinP, xds, xds_Precip = getBasinData(config=cfg, 
+                    #                                         stationID=stationID, 
+                    #                                         lat=lat, lon=lon, gdf=gdf, 
+                    #                                         region=region,
+                    #                                         removeSWE=cfg.data.removeSWE
+                    #                                         )
+                    # else:
+                    #     basinTWS, basinP, _, _ = getBasinData(config=cfg, 
+                    #                                         stationID=stationID, 
+                    #                                         region=region, gdf=gdf, lat=lat, lon=lon, 
+                    #                                         xds=xds, xds_Precip=xds_Precip,
+                    #                                         removeSWE=cfg.data.removeSWE)
+                    # #08042023, choose between max or sum
+                    # aggmethod = 'max'
+                    # if aggmethod =='sum':
+                    #     kwargs = {
+                    #         "method": "rx5d",
+                    #         "aggmethod":'sum',
+                    #         "name":'Q'
+                    #         }
+                    #     #convert Q to CSR5d intervals
+                    #     #this steps may introduce NaN values
+                    #     daQ = getCSR5dLikeArray(daQ, basinTWS, **kwargs)*86400
+                    # else:
+                    #     kwargs = {
+                    #         "method": "rx5d",
+                    #         "aggmethod":'max',
+                    #         "name":'Q'
+                    #         }
+                    #     #convert Q to CSR5d intervals
+                    #     #this steps may introduce NaN values
+                    #     daQ = getCSR5dLikeArray(daQ, basinTWS, **kwargs)
 
-                    if cfg.data.deseason:
-                        daQ      = removeClimatology(daQ, varname='Q', plotting=False)
-                        basinTWS = removeClimatology(basinTWS, varname='TWS',plotting=False)
-                        basinP   = removeClimatology(basinP, varname='P',plotting=False)
+                    # if cfg.data.deseason:
+                    #     daQ      = removeClimatology(daQ, varname='Q', plotting=False)
+                    #     basinTWS = removeClimatology(basinTWS, varname='TWS',plotting=False)
+                    #     basinP   = removeClimatology(basinP, varname='P',plotting=False)
                     
-                    varDict={'TWS':basinTWS, 'P':basinP, 'Q':daQ}
+                    # varDict={'TWS':basinTWS, 'P':basinP, 'Q':daQ}
 
-                    metricDict = calculateMetrics(cfg,stationID, varDict, river=row['river_x'])
-                    print (f"{stationID},{lat},{lon},{row['river_x']},{row['area_hys']}") # 'MI', {metricDict['mi']}, 'CMI', {metricDict['cmi']}")
-                    print (f"CMI {metricDict['cmi']}")
-                    allScores[stationID] = metricDict
+                    # metricDict = calculateMetrics(cfg,stationID, varDict, river=row['river_x'])
+                    # print (f"{stationID},{lat},{lon},{row['river_x']},{row['area_hys']}") # 'MI', {metricDict['mi']}, 'CMI', {metricDict['cmi']}")
+                    # print (f"CMI {metricDict['cmi']}")
+                    # allScores[stationID] = metricDict
             except Exception as e: 
                 raise Exception (e)
-
+        print ('number of good stations', goodStations)
+        return goodStations, validStation
         #07312023, add test for no seasonality
         #08032023, deseason is not meaningful [I'll keep the code to avoid issues]
         #08032023, add event_method to pkl name [for MAF, the cutoff does not mean anything]
@@ -3302,25 +3316,36 @@ def plotCausalEffectHeatMap(cfg, region, binary=True):
 
 if __name__ == '__main__':    
     #08022023 notes:
-    #itask =1,  regenerates all metrics for all global regions
-    #itask =3,  generates all gloFAS metrics
-    #itask =8,  generates Figure 1
-    #itask =12, plot figure 2 in the paper
-    #itask =18, figure 2
-    #itask =14, plot figure 3 in the paper
-    #itask =15, Figure S3
+    #itask =1, regenerates all metrics for all global regions
+    #itask =8, generates Figure 1A, 1B
+    #itask =15, generates Figure 1C
     #itask =10, print the latex table [copy/past into latex]
-    #other tasks were not used in the final version
+    #itask =14, plot figure 2
+    #itask =12, plot figure 3
 
     from myutils import load_config
     config = load_config('config.yaml')
 
-    itask = 10
+    itask = 1
     if itask == 1:
         #Turn reGen to True to reprocess all regions one by one to get MI, CMI, annual maxima
         #This generates all scatterplots used in Figure 1
+        #AS 0324: for GRL revision, this plots histogram of data completeness
+        goodStationTotal = 0
+        allValidStations = {}
         for region in config.data.regions:
-            main(cfg=config, region=region)
+            goodStations, validStation =  main(cfg=config, region=region)
+            allValidStations.update(validStation)
+            goodStationTotal+=goodStations
+        print (allValidStations)
+        print ('total number of good stations is ', goodStationTotal)
+        _, ax = plt.subplots(1,1,figsize=(6,6))
+        validYears = list(allValidStations.values())
+        ax.hist(validYears)
+        ax.set_ylabel('GRDC Stations')
+        ax.set_xlabel('Years w/ Data Completion')
+        plt.savefig('./outputs/grdc_station_valid_year_histogram.png')
+        plt.close()
     elif itask == 2:
         #plot all regions
         plotAllRegions(config, features=['TWS_MI', 'TWS_CMI', 'P_MI', 'T_MI'])
@@ -3340,6 +3365,7 @@ if __name__ == '__main__':
         plotJRPMap(cfg=config, region="north_america", varname='P')        
     elif itask == 8: 
         #Figure 1 (grdc)  
+        #Figure 1C is generated by using compareGRDC_GloFAS() [as0820, not used]
         #plot CMI vs. joint probability of TWS and P
         #(joint probability is generated by running compound_events.py)
         #use figsize (20, 12) to make maps appear in right sizes
@@ -3398,7 +3424,7 @@ if __name__ == '__main__':
         plotCausalEffectBivariate(cfg=config, region="north_america", pcnt=None)
     elif itask == 12:
         #this generates Figure 2 (subfigures on lat ACE)
-        #Figure 2 (the latitude comparison and histograms, note: I removed histograms in Illustrator to save space
+        #Figure 2 (the latitude comparison and histograms, note: I removed histograms in AI to save space
         plotCausalEffectLat(cfg=config, pcnt=None)
         #08222023, uncomment the following for binary event based ACE
         #plotCausalEffectLat(cfg=config, pcnt=90)
@@ -3408,17 +3434,17 @@ if __name__ == '__main__':
         plotGRanD(config)
     elif itask == 14:
         #Figure 3
-        #generate figure using correlation at max lag
+        #generate figure using hydroriver, global dam database, correlation at max lag
         plotGRanD_MaxLag(config, region='north_america', binary=True)
     elif itask == 15:
-        #SI-A, Figure S3, scatter plot
+        #SI-A, Figure S3
         compareGRDC_GloFAS(config)
     elif itask == 16:
         #Support information, Figure S2
         plotSI(config)
     elif itask == 17:
         plot5d_vs_monthly(config)
-    elif itask == 18: 
+    elif itask == 18:
         #this generates Figure 2 (subfigures on ACE maps)
         fig,axes = plt.subplots(2,1, figsize=(10,8),subplot_kw={'projection': ccrs.PlateCarree()})    
         
@@ -3455,5 +3481,6 @@ if __name__ == '__main__':
     elif itask == 20:
         #Figure 3
         plotCausalEffectHeatMap(config, region="north_america", binary=True)        
+
     else:
         raise Exception("Invalid options")

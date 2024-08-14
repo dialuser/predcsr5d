@@ -3,15 +3,20 @@
 #conda env: mympi
 #purpose: extract glofas flow series
 #note: glofas region bounds are different from those used for grdc
-#rev date: 09092023
+#rev date: 09092023, fixed lat/lon in /home/suna/work/grace/data/grdc/GRDC_Stations_validated.csv
+#                    this was manually done using arcpro project C:\Alex\nasa_2019\GRDC_data\grdc_node_validation.aprx
+#            
 #=========================================================================================
 import pandas as pd
 import os,sys
 os.environ['USE_PYGEOS'] = '0'
 import geopandas as gpd
 
-from grdc import getStationMeta, getRegionBound, getGloFASStations, getBasinData,getCSR5dLikeArray,calculateMetrics
+from grdc import getStationMeta, getRegionBound, getBasinData,getCSR5dLikeArray,calculateMetrics
 import xarray as xr
+#date: 0909
+#this version includes any grdb basin greater than 12,0000 km2
+#=============================================================================================
 import numpy as np
 import pickle as pkl
 import matplotlib.pyplot as plt
@@ -22,6 +27,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.lines import Line2D
 import matplotlib.patches as mpatches
 
+from myutils import genColorList
 
 regiondict = {
     'north_america': 'na',
@@ -42,17 +48,20 @@ def loadGLOFAS4Region(region):
     return ds
 
 def getCatalog(cfg, region):
-    rootdir = f'/home/suna/work/predcsr5d/data/glofas'
-    geosonfile = os.path.join(rootdir, f'{regiondict[region]}/stationbasins_{regiondict[region]}.geojson')
-    print (geosonfile)
+    rootdir = f'/home/suna/work/predcsr5d/data/glofasnew'
+    geosonfile = os.path.join(rootdir, f'{regiondict[region]}/stationbasins.geojson')
     gdf = gpd.read_file(geosonfile)
     gdf['grdc_no'] = pd.to_numeric(gdf['grdc_no'], downcast='integer')
     #filter stations that satisfy the min area requirements 
     cutoff_area = cfg.data.min_basin_area
+    #change name to area
+    if 'area' in gdf.columns:
+        gdf = gdf.rename(columns={'area':'area_hys'})    
+
     gdf = gdf[gdf['area_hys']>=cutoff_area]
     return gdf
 
-def extractBasinOutletQ(loc, region, ds=None, startDate='2002-01-01', endDate='2020-12-31'):
+def extractBasinOutletQ(fid, stationID, loc, region, ds=None, startDate='2002-01-01', endDate='2020-12-31'):
     """Load GloFAS output for given location
     note: glofas cell is 0.05x0.05
     Param
@@ -82,7 +91,7 @@ def extractBasinOutletQ(loc, region, ds=None, startDate='2002-01-01', endDate='2
         counter=0
         abandon = False
         while len(daQ['lat'])==0: 
-            print ('not finding cell, increasing lat toler')
+            #print ('not finding cell, increasing lat toler')
             lat_toler+=0.01
             daQ = getSingleSeries(da, lon, lat)
             counter+=1
@@ -93,7 +102,7 @@ def extractBasinOutletQ(loc, region, ds=None, startDate='2002-01-01', endDate='2
         if not abandon:
             counter=0        
             while len(daQ['lon'])==0:
-                print ('not finding cell, increasing lon toler')
+                #print ('not finding cell, increasing lon toler')
                 lon_toler+=0.01
                 daQ = getSingleSeries(da, lon, lat)       
                 counter+=1
@@ -113,70 +122,122 @@ def extractBasinOutletQ(loc, region, ds=None, startDate='2002-01-01', endDate='2
             elif len(daQ.lon)>1 and len(daQ.lat)>1: #3D array
                 daQ = daQ.isel(lon=ix[2], lat=ix[1])
             daQ = daQ.squeeze()
-            print ('=======max streamflow for ', daQ.max(dim='time').values, '===============')
-            print ('=======min streamflow for ', daQ.min(dim='time').values, '===============')
-            return daQ
+            #0910, we ignore small streams < 100 m3/s
+            if daQ.max(dim='time').values >= 100.0:
+                print (f'=======streamflow for {stationID} ', daQ.max(dim='time').values, daQ.min(dim='time').values, '===============')
+                if not fid is None:
+                    fid.write(f"\nstreamflow for {stationID}: {daQ.max(dim='time').values}, {daQ.min(dim='time').values}\n")
+                return daQ
+            else:
+                return None
         else:
+            print (stationID, ' not found')
             return None
     else:
         return None
+
+def getGloFASStations(cfg, dfRegion):
+    #0910, replace with updated station catalog
+    grdcfile = '/home/suna/work/grace/data/grdc/GRDC_Stations_validated.csv'    
+    df = pd.read_csv(grdcfile, encoding = "ISO-8859-1")    
+    #join with dfRegion to get missing columns
+    dfJoin = pd.merge(
+        df,
+        dfRegion,
+        how="inner",
+        on='grdc_no',
+        sort=True,
+        suffixes=("_x", "_y"),
+        copy=True,
+        indicator=False,
+        validate=None,
+    )
+    glofasfile = '/home/suna/work/grace/data/grdc/Harrigan_et_al_Supplementary_Table_S1.csv'
+    df2 = pd.read_csv(glofasfile)
+    #rename Provider_ID to grdc_no
+    df2 = df2.rename(columns={"Provider_ID": "grdc_no"})
+
+    #0909: here I do a right join on dfJoin so I don't lose anything from dfJoin 
+    dfJoin = pd.merge(
+        df2,
+        dfJoin,
+        how="right",
+        on='grdc_no',
+        sort=True,
+        suffixes=("_x", "_y"),
+        copy=True,
+        indicator=False,
+        validate=None,
+    )
+
+    dfJoin = dfJoin.sort_values(by='area_hys', ascending=False)
+    dfJoin['grdc_no'] = dfJoin['grdc_no'].astype('int32')
+    #filter again
+    cutoff_area = cfg.data.min_basin_area
+    dfJoin = dfJoin[dfJoin['area_hys']>=cutoff_area]
+
+    print ('no records rows', dfJoin[dfJoin['Latitude_GloFAS'].isna()].shape)
+    return dfJoin
+
 
 def main(config, reGen=False):
 
     if reGen:
         allScores = {}
         xds = None
-        for region in config.data.regions_glofas:
-            gdf = getCatalog(config, region=region) #this includes all basin polygons
-            print (gdf)
-            return
-            dfStation = getGloFASStations(gdf)
+        with open('streamflow_debug.txt', 'w') as fid:
+            for region in config.data.regions_glofas:
+                gdf = getCatalog(config, region=region) #this includes all basin polygons
+                dfStation = getGloFASStations(config, gdf)
 
-            print (region, dfStation.shape)
-            ds = loadGLOFAS4Region(region = region)
-
-            for ix, row in dfStation.iterrows():
-                stationID = row['grdc_no']
-                #!!! change to use GloFAS lat/lon
-                lat,lon = float(row['Latitude_GloFAS']), float(row['Longitude_GloFAS'])
-                daGloFAS = extractBasinOutletQ(loc=(lat,lon), ds=ds, region=region)
-                if not daGloFAS is None:
-                    if xds is None:
-                        #only store xds on first call
-                        basinTWS, basinP, xds, xds_Precip = getBasinData(config=config, 
-                                stationID=stationID, 
-                                lat=lat, lon=lon, gdf=gdf, 
-                                region=region)
+                print (region, dfStation.shape, gdf.shape)
+                #load simulated glofas streamflow data 
+                ds = loadGLOFAS4Region(region = region)
+                for ix, row in dfStation.iterrows():
+                    stationID = row['grdc_no']
+                    #!!! if GloFAS lat/lon exists
+                    if not np.isnan(row['Latitude_GloFAS']) and not np.isnan(row['Longitude_GloFAS']):
+                        lat,lon = float(row['Latitude_GloFAS']), float(row['Longitude_GloFAS'])
                     else:
-                        basinTWS, basinP, _, _ = getBasinData(config=config, 
-                                stationID=stationID, \
-                                region=region, gdf=gdf, lat=lat, lon=lon, \
-                                xds=xds, xds_Precip=xds_Precip)
+                        lat,lon = float(row['lat']), float(row['long'])
+                    daGloFAS = extractBasinOutletQ(fid, stationID, loc=(lat,lon), ds=ds, region=region)
 
+                    if not daGloFAS is None:
+                        if xds is None:
+                            #only store xds on first call
+                            basinTWS, basinP, xds, xds_Precip = getBasinData(config=config, 
+                                    stationID=stationID, 
+                                    lat=lat, lon=lon, gdf=gdf, 
+                                    region=region)
+                        else:
+                            basinTWS, basinP, _, _ = getBasinData(config=config, 
+                                    stationID=stationID, \
+                                    region=region, gdf=gdf, lat=lat, lon=lon, \
+                                    xds=xds, xds_Precip=xds_Precip)
 
-                    kwargs = {
-                        "method": "rx5d",
-                        "aggmethod":'max',
-                        "name":'Q'
-                        }
+                        kwargs = {
+                            "method": "rx5d",
+                            "aggmethod":'max',
+                            "name":'Q'
+                            }
 
-                    daGloFAS = getCSR5dLikeArray(daGloFAS, basinTWS, **kwargs)
-                    #06262023, normalize by drainage area
-                    daGloFAS = daGloFAS/row['area_hys']
+                        daGloFAS = getCSR5dLikeArray(daGloFAS, basinTWS, **kwargs)
+                        #06262023, normalize by drainage area
+                        daGloFAS = daGloFAS/row['area_hys']
 
-                    varDict={'TWS':basinTWS, 'P':basinP, 'Qs': daGloFAS}
-                    
-                    metricDict = calculateMetrics(config, stationID, varDict, onGloFAS=True)
+                        varDict={'TWS':basinTWS, 'P':basinP, 'Qs': daGloFAS}
+                        
+                        metricDict = calculateMetrics(config, stationID, varDict, onGloFAS=True)
 
-                    print (f"{stationID},{lat},{lon},{row['river_x']},{row['area_hys']}") # 'MI', {metricDict['mi']}, 'CMI', {metricDict['cmi']}")
-                    print (f"CMI {metricDict['cmi']}")
+                        print (f"{stationID},{lat},{lon},{row['river_x']},{row['area_hys']}") # 'MI', {metricDict['mi']}, 'CMI', {metricDict['cmi']}")
+                        print (f"CMI {metricDict['cmi']}")
 
-                    allScores[stationID] = metricDict
-                else:
-                    print (stationID, 'abandoned')
-        pkl.dump(allScores, open(f'grdcresults/GLOFAS_all_{config.event.cutoff}.pkl', 'wb'))
+                        allScores[stationID] = metricDict
+                    else:
+                        print (stationID, 'abandoned')
+            pkl.dump(allScores, open(f'grdcresults/GLOFAS_all_{config.event.cutoff}_new.pkl', 'wb'))
     else:
-        allScores = pkl.load(open(f'grdcresults/GLOFAS_all_{config.event.cutoff}.pkl', 'rb'))
+        allScores = pkl.load(open(f'grdcresults/GLOFAS_all_{config.event.cutoff}_new.pkl', 'rb'))
     return allScores
 
 def plotBivariate(cfg, use_percentile=False):
@@ -208,7 +269,7 @@ def plotBivariate(cfg, use_percentile=False):
 
         #get GRDC station geopdf
         gdf = getCatalog(cfg, region=region) #this includes all basin polygons
-        dfStation = getGloFASStations(gdf)
+        dfStation = getGloFASStations(cfg, gdf)
 
         dfStation = dfStation[dfStation['grdc_no'].isin(validStations)]
         dfStation = dfStation.merge(dfMetrics, on='grdc_no', how='inner')
@@ -237,34 +298,7 @@ def plotBivariate(cfg, use_percentile=False):
                 counter+=1
         print ('total processed', ns)
 
-    def hex_to_Color(hexcode):
-        ### function to convert hex color to rgb to Color object (generativepy package)
-        rgb = ImageColor.getcolor(hexcode, 'RGB')
-        rgb = [v/256 for v in rgb]
-        rgb = Color(*rgb)
-        return rgb
     
-    def genColorList(num_grps):
-        ### get corner colors from https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/
-        c00 = hex_to_Color('#D5F5E3') #light green
-        c10 = hex_to_Color('#58D68D') #deep green 
-        c01 = hex_to_Color('#F1948A') #light orange
-        c11 = hex_to_Color('#E74C3C')
-        ### now create square grid of colors, using color interpolation from generativepy package
-        c00_to_c10 = []
-        c01_to_c11 = []
-        colorlist  = []
-        for i in range(num_grps):
-            c00_to_c10.append(c00.lerp(c10, 1/(num_grps-1) * i))
-            c01_to_c11.append(c01.lerp(c11, 1/(num_grps-1) * i))
-        
-        for i in range(num_grps):
-            for j in range(num_grps):
-                colorlist.append(c00_to_c10[i].lerp(c01_to_c11[i], 1/(num_grps-1) * j))
-        
-        ### convert back to hex color
-        colorlist = [rgb2hex([c.r, c.g, c.b]) for c in colorlist]
-        return colorlist
 
     if cfg.maps.global_basin == 'majorbasin':
         shpfile = os.path.join('maps', 'Major_Basins_of_the_World.shp')
@@ -275,7 +309,7 @@ def plotBivariate(cfg, use_percentile=False):
     rootdir = '/home/suna/work/predcsr5d'
 
     # This can be converted into a `proj4` string/dict compatible with GeoPandas    
-    fig,ax = plt.subplots(1,1, figsize=(16, 8), subplot_kw={'projection': ccrs.PlateCarree()})
+    fig,ax = plt.subplots(1,1, figsize=(16, 10), subplot_kw={'projection': ccrs.PlateCarree()})
     #DEFINE plot extent
     myextent = (-160,180,-50, 60)
     lon0,lon1,lat0,lat1 = myextent
@@ -325,7 +359,7 @@ def plotBivariate(cfg, use_percentile=False):
     else:
         swe=""
 
-    outputDict2 = pkl.load(open(f'grdcresults/glofas_{cfg.event.event_method}_all_events{swe}.pkl', 'rb'))
+    outputDict2 = pkl.load(open(f'grdcresults/glofas_{cfg.event.event_method}_all_events{swe}_new.pkl', 'rb'))
     validStations = list(outputDict2.keys())
     print(len(validStations))
     cmi=[]
@@ -354,7 +388,6 @@ def plotBivariate(cfg, use_percentile=False):
     print (np.percentile(arr, [0, 25, 50, 75, 100]))
     
     colorlist = genColorList(len(cd)-1)
-
 
     if plotClimateMap:
         #make color bar
@@ -394,9 +427,12 @@ def plotBivariate(cfg, use_percentile=False):
             _=ax.set_xticks(list(range(len(percentile_bounds)+1)), xticks)
             _=ax.set_xlabel(variable2, fontsize=15)
             _=ax.set_yticks(list(range(len(percentile_bounds)+1)), yticks)
-            _=ax.set_ylabel('TWS_Q', fontsize=15)
+            _=ax.set_ylabel('TWSA_Q', fontsize=15)
     
-    plt.savefig(f'outputs/global_glofas_bivariate_{dictkey}.eps')
+            ll, bb, ww, hh = ax.get_position().bounds
+            ax.set_position([ll, bb, ww*1.2, hh*1.2])
+
+    plt.savefig(f'outputs/global_glofas_bivariate_{dictkey}_new.eps')
     plt.close()
 
 
@@ -405,12 +441,13 @@ if __name__ == '__main__':
     config = load_config('config.yaml')
 
     reGen=True
-    itask = 1
+    itask = 2
     if itask == 1:
         #generate global glofas metrics
         main(config, reGen=reGen)
     elif itask == 2:
         #asun 08202023, regenerated
-        #figure 4, plot bivariate plot for GLOFAS
+        #Figure 4, plot bivariate plot for GLOFAS
+        #this can be used to replace the current one
         plotBivariate(config)
 

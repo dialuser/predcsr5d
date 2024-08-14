@@ -10,7 +10,12 @@
 #rev date: 07312023, consider remove season option, this is enabled by setting cfg.data.deseason to true
 #rev date: 08012023, change to use fake 5d data generated from monthly solutions
 #rev date: 08022023, cleanup and add annotations
-#rev date: 08052023, implemented SWE removal  cfg.data.removeSWE
+#rev date: 08052023, implemented SWE removal  to use SWE, set cfg.data.removeSWE to True
+#rev date: 08072023, fixed bug in doSWERemoval, should use anomaly by subtracting mean SWE
+#rev date: 09192023, added yangtze river data
+#rev date: 10312023, fixed bug in compound_events_monthly related to dates. Now the fake5d dates are 
+#                    enforced to be the same as csr5d dates
+#rev date: 03292024, plot diff between 5d and monthly
 #=======================================================================================================
 import pandas as pd
 import os
@@ -39,6 +44,7 @@ from scipy.stats import pearsonr
 from generativepy.color import Color
 from matplotlib.colors import rgb2hex
 import rioxarray as rxr
+import matplotlib
 
 import seaborn as sns
 
@@ -60,6 +66,7 @@ import glofas_us
 from glofas_us import extractBasinOutletQ, loadGLOFAS4CONUS
 from myutils import bandpass_filter,removeClimatology
 from csr_monthly_dataloader import convertMonthlyTo5d, loadFake5ddatasets,loadFake5ddatasetsNoSWE
+from myutils import genColorList
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -259,12 +266,15 @@ def getBasinData(config, stationID, region, lat, lon, xds = None,
     #TWS
     #07142023: use TWS 0.25 for masking, but ERA5 1deg for masking
     #          ERA5 0.25 deg is too big to load into memory
-    #          Do this in two steps. Step 1: turn coarsen in load5ddatasets to True, reload to True in both load5ddatasets and loadClimatedatasets=>1deg data
-    #          Step 2: turn coarsen to False, reload to True in load5ddatasets, but False in loadClimatedatasets => 0.25 deg data
+    #Do this in two steps. 
+    #   Step 1: turn coarsen in load5ddatasets to True, reload to True in both loadFake5ddatasetsNoSWE and loadClimatedatasets=>1deg data
+    #           comment out da = da.interp(coords={'lat':daCSR0.lat, 'lon':daCSR0.lon, 'time':da.time}, method='nearest') in csr_monthly_dataloader.py                                
+    #   Step 2: turn coarsen to False, reload to True in loadFake5ddatasetsNoSWE, 
+    #           uncomment da = da.interp(coords={'lat':daCSR0.lat, 'lon':daCSR0.lon, 'time':da.time}, method='nearest') in csr_monthly_dataloader.py                                
+    #           but False in loadClimatedatasets => 0.25 deg data
     if xds is None:
         if not removeSWE:
             print ('!!! Load original TWS')
-
             xds,_, _ = loadFake5ddatasets(cfg=config, 
                 region=region, 
                 coarsen=False, 
@@ -276,7 +286,8 @@ def getBasinData(config, stationID, region, lat, lon, xds = None,
             print ('!!! load TWS w/ SWE removal')
             xds = loadFake5ddatasetsNoSWE(cfg=config,
                 region=region,
-                coarsen=False,
+                coarsen=True,   #change this to false and comment out 0.25 in csr_monthly_dataloader.py
+                reLoad=config.monthly.reload,   
                 mask_ocean=config.data.mask_ocean,
                 startYear=datetime.strptime(config.data.start_date, '%Y/%m/%d').date().year,
                 endYear=datetime.strptime(config.data.end_date, '%Y/%m/%d').date().year
@@ -288,7 +299,7 @@ def getBasinData(config, stationID, region, lat, lon, xds = None,
     if xds_Precip is None:
         xds_Precip = loadClimatedatasets(region, vartype='precip', daCSR5d= xds, \
                                         aggregate5d=True, 
-                                        reLoad=config.data.reload_precip, 
+                                        reLoad= config.data.reload_precip, 
                                         precipSource=config.data.precip_source,
                                         startYear= datetime.strptime(config.data.start_date, '%Y/%m/%d').date().year,
                                         endYear=datetime.strptime(config.data.end_date, '%Y/%m/%d').date().year,
@@ -1022,6 +1033,12 @@ def getCatalog(region,source='grdc'):
 
     gdf = gpd.read_file(geosonfile)
     gdf['grdc_no'] = pd.to_numeric(gdf['grdc_no'], downcast='integer')
+
+    #as 09062023, the newer stationbasins.geojson files do not use area_hys anymore
+    #so i rename the column to make the code work
+    if 'area' in gdf.columns:
+        gdf = gdf.rename(columns={'area':'area_hys'})    
+
     return gdf
 
 def main(cfg, region):
@@ -1130,46 +1147,28 @@ def main(cfg, region):
                 allScores = pkl.load(open(f'grdcresults/{region}_GRDC_MIScores_{cfg.event.cutoff}_Q_noseason_monthly.pkl', 'rb'))
 
 
-def hex_to_Color(hexcode):
-    from PIL import ImageColor
+# def genColorList(num_grps):
+#     ### get corner colors from https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/
+#     c00 = hex_to_Color('#D5F5E3') #light green
+#     c10 = hex_to_Color('#58D68D') #deep green 
+#     c01 = hex_to_Color('#F1948A') #light orange
+#     c11 = hex_to_Color('#E74C3C')
 
-    ### function to convert hex color to rgb to Color object (generativepy package)
-    rgb = ImageColor.getcolor(hexcode, 'RGB')
-    rgb = [v/256 for v in rgb]
-    rgb = Color(*rgb)
-    return rgb
-
-def genColorList(num_grps):
-    ### get corner colors from https://www.joshuastevens.net/cartography/make-a-bivariate-choropleth-map/
-    c00 = hex_to_Color('#D5F5E3') #light green
-    c10 = hex_to_Color('#58D68D') #deep green 
-    c01 = hex_to_Color('#F1948A') #light orange
-    c11 = hex_to_Color('#E74C3C')
-
-    ### now create square grid of colors, using color interpolation from generativepy package
-    c00_to_c10 = []
-    c01_to_c11 = []
-    colorlist  = []
-    for i in range(num_grps):
-        c00_to_c10.append(c00.lerp(c10, 1/(num_grps-1) * i))
-        c01_to_c11.append(c01.lerp(c11, 1/(num_grps-1) * i))
+#     ### now create square grid of colors, using color interpolation from generativepy package
+#     c00_to_c10 = []
+#     c01_to_c11 = []
+#     colorlist  = []
+#     for i in range(num_grps):
+#         c00_to_c10.append(c00.lerp(c10, 1/(num_grps-1) * i))
+#         c01_to_c11.append(c01.lerp(c11, 1/(num_grps-1) * i))
     
-    for i in range(num_grps):
-        for j in range(num_grps):
-            colorlist.append(c00_to_c10[i].lerp(c01_to_c11[i], 1/(num_grps-1) * j))
+#     for i in range(num_grps):
+#         for j in range(num_grps):
+#             colorlist.append(c00_to_c10[i].lerp(c01_to_c11[i], 1/(num_grps-1) * j))
     
-    ### convert back to hex color
-    colorlist = [rgb2hex([c.r, c.g, c.b]) for c in colorlist]
-    return colorlist
-
-def genSingleColorList(num_grps):
-    c01 = hex_to_Color('#F1948A') #light orange
-    c11 = hex_to_Color('#E74C3C')
-    colorlist  = []
-    for i in range(num_grps):
-        colorlist.append(c01.lerp(c11, 1/(num_grps-1) * i))
-    colorlist = [rgb2hex([c.r, c.g, c.b]) for c in colorlist]
-    return colorlist
+#     ### convert back to hex color
+#     colorlist = [rgb2hex([c.r, c.g, c.b]) for c in colorlist]
+#     return colorlist
 
 def plotBivariate(cfg, region, ax, source='grdc', variable2='P_Q', use_percentile=False, ax_legend=None):
     """Reference: https://waterprogramming.wordpress.com/2022/09/08/bivariate-choropleth-maps/
@@ -1301,6 +1300,7 @@ def plotBivariate(cfg, region, ax, source='grdc', variable2='P_Q', use_percentil
 
     dfStation = dfStation.merge(dfMetrics, on='grdc_no', how='inner')
     
+    #asun10302023, why do we need this?
     if region == 'north_america':
         if use_percentile:
             cd = np.percentile(cmi, [0, 25, 50, 75, 100])
@@ -1593,44 +1593,201 @@ def plotGRanD_MaxLag(cfg,region):
     plt.close()
 
 
+def plotBivariateDiff(cfg, region, ax, source='grdc', variable2='P_Q', use_percentile=False, ax_legend=None):
+    #asun 0329, plot the difference between 5d and 5d-monthly products
+    
+    """Reference: https://waterprogramming.wordpress.com/2022/09/08/bivariate-choropleth-maps/
+    Parameters
+    source, can be either 'grdc' or 'gldas'
+    variable2: can be either CMI or P_Q
+    """
+    import seaborn as sns
+    # Use geopandas for vector data and xarray for raster data
+    import geopandas as gpd
+    import rioxarray as rxr
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from matplotlib.colors import ListedColormap
+
+    from matplotlib.patches import Rectangle
+    from matplotlib.collections import PatchCollection    
+    
+    assert(variable2 in ['CMI', 'P_Q'])
+    if variable2 == 'CMI':
+        dictkey = 'cmi'
+    else:
+        dictkey = 'P'
+
+    
+    if cfg.maps.global_basin == 'majorbasin':
+        shpfile = os.path.join('maps', 'Major_Basins_of_the_World.shp')
+    elif cfg.maps.global_basin == 'hydroshed':
+        shpfile = os.path.join('maps/hydrosheds', hydroshedMaps[region])
+    gdfHUC2 = gpd.read_file(shpfile)
+
+    #get GRDC station geopdf
+    gdf = getCatalog(region)
+    dfStation = getStationMeta(gdf)
+
+    rootdir = '/home/suna/work/predcsr5d'
+    koppenmap = rxr.open_rasterio(os.path.join(rootdir, 'data/koppenclimate/koppen5.tif'), masked=True)  
+    print("The CRS for this data is:", koppenmap.rio.crs)
+    print("The spatial extent is:", koppenmap.rio.bounds())
+    lon0, lat0, lon1, lat1 = getRegionBound(region)
+    koppenmap = koppenmap.sortby(koppenmap.y)
+    koppenmap_region = koppenmap.sel(y=slice(lat0,lat1),x=slice(lon0,lon1))
+
+    #fig, ax = plt.subplots(1,1, figsize=figsizes(20,18))
+    #
+    #plot the Koppen climate map
+    #note how colorbar is set up: level is 1 more than number of categories
+    #
+
+    cmap = sns.color_palette(["#85C1E9", "#FFD54F", "#DCEDC8", "#CFD8DC", "#E1BEE7"])
+    im = koppenmap_region.plot(levels=[1, 2, 3, 4, 5, 6], colors=cmap, alpha=0.60, ax=ax, add_colorbar=False)
+    ax.set_title('')    
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+
+    #remove the lat/lon ticks and tick labels
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    for axis in ['top', 'bottom', 'left', 'right']:
+        ax.spines[axis].set_linewidth(1.5) 
+
+    if region=='north_america':
+        bounds = np.arange(0.5, 6.5)
+        cb = plt.colorbar(im, cax=ax_legend, ticks=bounds, orientation="horizontal", shrink=0.7)
+        #cb.set_ticks([bounds[0]] + [(b0 + b1) / 2 for b0, b1 in zip(bounds[:-1], bounds[1:])] + [bounds[-1]])
+        cb.set_label(label='')
+        cb.ax.tick_params(labelsize=15,length=0)
+        cb.ax.set_xticklabels(["", 'Tropical', 'Arid', 'Temperate', 'Cold', 'Polar'])
+
+    #plot HUC2 boundaries
+    gdfHUC2.plot(ax=ax, facecolor="none", edgecolor="w", legend=False)       
+    
+    #plot bivariates
+    if source=='grdc':
+        if cfg.causal.exclude_Q:
+            if not cfg.data.deseason:
+                outputDict = pkl.load(open(f'grdcresults/{region}_GRDC_MIScores_{cfg.event.cutoff}_monthly.pkl', 'rb'))        
+                outputDict2 = pkl.load(open(f'grdcresults/{region}_all_events_monthly.pkl', 'rb'))
+                #this is 5d analysis w/ swe removal
+                outputDict2_5d = pkl.load(open(f'grdcresults/{region}_MAF_all_eventsswe.pkl', 'rb'))     
+
+            else:
+                outputDict = pkl.load(open(f'grdcresults/{region}_GRDC_MIScores_{cfg.event.cutoff}_noseason_monthly.pkl', 'rb'))        
+                outputDict2 = pkl.load(open(f'grdcresults/{region}_all_events_noseason_monthly.pkl', 'rb'))
+                #this is 5d analysis w/ swe removal
+                outputDict2_5d = pkl.load(open(f'grdcresults/{region}_MAF_all_events_noseasonswe.pkl', 'rb'))     
+                
+        else:
+            if not cfg.data.deseason:
+                outputDict = pkl.load(open(f'grdcresults/{region}_GRDC_MIScores_{cfg.event.cutoff}_Q_monthly.pkl', 'rb'))        
+                outputDict2 = pkl.load(open(f'grdcresults/{region}_all_events_monthly.pkl', 'rb'))
+            else:
+                outputDict = pkl.load(open(f'grdcresults/{region}_GRDC_MIScores_{cfg.event.cutoff}_Q_noseason_monthly.pkl', 'rb'))        
+                outputDict2 = pkl.load(open(f'grdcresults/{region}_all_events_noseason_monthly.pkl', 'rb'))
+
+        validStations = list(outputDict.keys())
+            
+    else:
+        raise ValueError()
+
+    print (len(validStations))
+
+    cmi=[]
+    if variable2=='CMI':
+        for stationID in validStations:        
+            stationDict = outputDict[stationID]                            
+            cmi.append(stationDict[dictkey])       
+    else:
+        for stationID in validStations:        
+            stationDict = outputDict2[stationID]       
+            cmi.append(stationDict[dictkey])       
+
+    print ('no cmi', len(cmi))
+    arr=[]
+    possites=0
+    for stationID in validStations:
+        stationDict = outputDict2[stationID]            
+        stationDict5d = outputDict2_5d[stationID]
+        #asun, show the diff [convert to actual number of events]
+        arr.append(int((stationDict5d['TWS'] - stationDict['TWS'])*16))
+        #record sites equal or better (i want to keep equal here)
+        if (stationDict5d['TWS'] - stationDict['TWS']) >=0:
+            possites+=1
+    print ('no arr', len(arr))
+    print ('number of sites csr5d>csr.monthly', possites)
+    #construct a DF for the variable cmi
+    dfStation = dfStation[dfStation['grdc_no'].isin(validStations)]
+    dfMetrics = pd.DataFrame({'grdc_no': np.array(validStations,dtype=np.int64), variable2:np.array(cmi), 'Q_TWS': arr})
+    dfStation = dfStation.merge(dfMetrics, on='grdc_no', how='inner')
+    # I only need to show the diff on single variate map    
+    gdfCol = gpd.GeoDataFrame(dfStation[['Q_TWS']], geometry=gpd.points_from_xy(dfStation.long, dfStation.lat))
+    print (gdfCol)
+    #gdfCol.plot(column = 'Q_TWS', cmap='RdBu', legend_kwds={'shrink': 0.5, 'extend': 'both'}, legend=False,  vmin=-0.5, vmax=0.5)
+    
+    cmap = 'RdBu_r'
+    cmap = plt.get_cmap(cmap, 9)
+
+    if region=='north_america': 
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("left", size="2%", pad=0.45, axes_class=plt.Axes) 
+        gdfCol.plot(column='Q_TWS', ax=ax, cax = cax, cmap=cmap, marker='o', markersize= 110, alpha=1.0,
+                        edgecolor='#546E7A', legend_kwds={'shrink': 0.5, 'extend': 'both'}, 
+                        legend=True, vmin=-4, vmax=4)
+    else:
+        gdfCol.plot(column='Q_TWS', ax=ax, cmap=cmap, marker='o', markersize= 110, alpha=1.0,
+                        edgecolor='#546E7A', legend=False, vmin=-4, vmax=4)
+
+    return possites
 if __name__ == '__main__':    
     from myutils import load_config
     config = load_config('config.yaml')
 
-    itask = 8
+    itask = 9
     if itask == 1:
         #turn reGen to True to reprocess all regions one by one to get MI, CMI, annual maxima
         for region in config.data.regions:
             main(cfg=config, region=region)
     elif itask == 8: 
-        #Figure 1A (grdc), Figure 1B (glofas), 
-        #Figure 1C is generated by using compareGRDC_GloFAS()
-        #plot CMI vs. joint probability of TWS and P
-        #(joint probability is generated by running compound_events.py)
-        #use figsize (20, 12) to make maps appear in right sizes
+        #this generates the monthly bivariate plot in the supporting information
         source = 'grdc'
         if source =='grdc':
-            fig = plt.figure(figsize=(20, 12))    
-            gs = fig.add_gridspec(3, 3,  height_ratios=(1, 1, 0.05),
+            fig = plt.figure(figsize=(20, 15))    
+            gs = fig.add_gridspec(3, 4,  
+                                  height_ratios=(1, 1, 0.05),
+                                  width_ratios = (1, 1, 1, 1),
                         left=0.1, right=0.95, bottom=0.1, top=0.9,
                         wspace=0.05, hspace=0.02)       
-            ax0 = fig.add_subplot(gs[0,:2])
-            ax1 = fig.add_subplot(gs[0,2])
+            #0920 add asia
+            ax_as = fig.add_subplot(gs[1,3])
+            ax0 = fig.add_subplot(gs[0,:3])
+            ax1 = fig.add_subplot(gs[0,3])
             ax2 = fig.add_subplot(gs[1,0])
             ax3 = fig.add_subplot(gs[1,1])
             ax4 = fig.add_subplot(gs[1,2])
-            allax = [ax0,ax1,ax2,ax3,ax4]
+            allax = [ax0,ax1,ax2,ax3,ax4,ax_as]
             ax_legend = fig.add_subplot(gs[2,:])
 
+            ll, bb, ww, hh = ax0.get_position().bounds
+            ax0.set_position([ll, bb, ww*0.9, hh*0.9])
+
+            #09062023, note the plot order is controlled by the order of the regionsl in config.yml
             for region,theax in zip(config.data.regions, allax):
                 plotBivariate(cfg=config, region=region, ax=theax, source='grdc', variable2='P_Q', ax_legend=ax_legend)
             plt.subplots_adjust(wspace=0.05,hspace=0.01,left=None, bottom=None, right=None, top=None)
+
             if not config.data.deseason:
                 plt.savefig('outputs/grdc_bivariate_P_monthly.png')
             else:
                 plt.savefig('outputs/grdc_bivariate_P_noseason_monthly.png')
             plt.close()
         else:
+            #for GloFAS
             fig,ax = plt.subplots(1,1, figsize=(12, 7.5))
             divider = make_axes_locatable(ax)
             cax = divider.append_axes("bottom", size="5%", pad="2%")
@@ -1641,5 +1798,40 @@ if __name__ == '__main__':
             else:
                 plt.savefig("outputs/glofas_bivariate_P_noseason_monthly.png")
             plt.close()
+    elif itask == 9:
+        #asun 0329, plot the difference between 5d and monthly-5d for GRL SI        
+        fig = plt.figure(figsize=(20, 15))    
+        gs = fig.add_gridspec(3, 4,  
+                                height_ratios=(1, 1, 0.05),
+                                width_ratios = (1, 1, 1, 1),
+                    left=0.1, right=0.95, bottom=0.1, top=0.9,
+                    wspace=0.05, hspace=0.02)       
+        #0920 add asia
+        ax_as = fig.add_subplot(gs[1,3])
+        ax0 = fig.add_subplot(gs[0,:3])
+        ax1 = fig.add_subplot(gs[0,3])
+        ax2 = fig.add_subplot(gs[1,0])
+        ax3 = fig.add_subplot(gs[1,1])
+        ax4 = fig.add_subplot(gs[1,2])
+        allax = [ax0,ax1,ax2,ax3,ax4,ax_as]
+        ax_legend = fig.add_subplot(gs[2,:])
+
+        ll, bb, ww, hh = ax0.get_position().bounds
+        ax0.set_position([ll, bb, ww*0.9, hh*0.9])
+
+        #09062023, note the plot order is controlled by the order of the regionsl in config.yml
+        pos_sites = 0 #number of sites csr5d has more events than csr.monthly
+        for region,theax in zip(config.data.regions, allax):
+            pos_sites += plotBivariateDiff(cfg=config, region=region, ax=theax, source='grdc', variable2='P_Q', ax_legend=ax_legend)
+
+        print ('total positive sites', pos_sites)
+        plt.subplots_adjust(wspace=0.05,hspace=0.01,left=None, bottom=None, right=None, top=None)
+
+        if not config.data.deseason:
+            plt.savefig('outputs/grdc_bivariate_P_monthly_vs_5d_diff.png')
+        else:
+            plt.savefig('outputs/grdc_bivariate_P_noseason_monthly_vs_5d_diff.png')
+        plt.close()
+
     else:
         raise Exception("Invalid options")

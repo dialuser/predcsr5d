@@ -1,5 +1,9 @@
 #author: alex sun
-#date: 0906
+#date: 09062023
+#purpose: generate streamflow time series
+#conda env: mympi
+#- Run this code to generate streamflow records in GRDB format
+#- copy the files to /home/suna/work/grace/data/grdc/asia/
 #====================================================================
 import pandas as pd
 import calendar
@@ -34,7 +38,7 @@ def parse_yangtze():
                     counter+=1
     bigDF = pd.DataFrame(data=np.concatenate(flowRates), index=pd.to_datetime(alldates), columns=gage_names)
     #save it
-    pkl.dump(bigDF, open('data/yangtzeQ.pkl', 'wb'))
+    pkl.dump(bigDF, open('data/yangtze_analysis/yangtzeQ.pkl', 'wb'))
 
 def read_file_into_buffer(file_path):   
    with open(file_path, 'rb') as file:      
@@ -42,7 +46,7 @@ def read_file_into_buffer(file_path):
    return file_contents
 
 def checkData():
-    df = pkl.load(open('data/yangtzeQ.pkl', 'rb'))
+    df = pkl.load(open('data/yangtze_analysis/yangtzeQ.pkl', 'rb'))
     df = df[df.index.year>=2002].copy(deep=True)
 
     #now print out in the format of GRDC
@@ -50,7 +54,7 @@ def checkData():
     #2004-01-01;--:--;  10000.000
     grdcdict = {'yichang': '2181600', 'hankou': '2181800'}
     for station in grdcdict.keys():
-        file_content = read_file_into_buffer(os.path.join('/home/suna/work/grace/data/grdc/asia/original', f'{grdcdict[station]}_Q_Day.Cmd.txt'))
+        file_content = read_file_into_buffer(os.path.join('/home/suna/work/grace/data/grdc/asia/original', f'data/yangtze_analysis/{grdcdict[station]}_Q_Day.Cmd.txt'))
         adf = df[station]
         
         adf.index = adf.index.strftime('%Y-%m-%d')

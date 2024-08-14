@@ -1,5 +1,4 @@
-#Author: Alex Sun
-#Purpose Perform compound event analysis 
+#author: Alex Sun
 #date: 06182023
 #date: 07202023, reviewed likelihood multiplication factor calculation
 #date: 07232023, not using LMF, revised JRP calculation
@@ -20,7 +19,7 @@ import seaborn as sns
 from matplotlib.colors import ListedColormap
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import cartopy.crs as ccrs
-
+from statsmodels.distributions.empirical_distribution import ECDF
 
 from grdc import getCatalog, getStationMeta,readStationSeries,getBasinData
 from grdc import getGloFASStations
@@ -32,6 +31,22 @@ from myutils import removeClimatology, getExtremeEvents, getCompoundEvents
 from blockbootstrap import BlockBS
 
 
+def doBlockBS(daTWs, daP, daQ, nRZ):
+    dfTWS = daTWs.to_dataframe()
+    dfTWS = pd.Series(dfTWS['lwe_thickness'].values, index=dfTWS.index)
+    dfP = daP.to_dataframe()
+    dfP = pd.Series(dfP['tp'].values, index=dfP.index)
+    dfQ = daQ.to_dataframe()
+    dfQ = pd.Series(dfQ['Q'].values, index=dfQ.index)
+    dfQ = dfQ.fillna(method='ffill')
+
+    dataDict={
+        'TWS': dfTWS,
+        'Q': dfQ,
+        'P': dfP
+    }
+    bbs = BlockBS(dataDict, nRZ)
+    return bbs
 
 def compound_events_analysis(cfg, region, plotStations=False):
     gdf = getCatalog(region)
@@ -44,12 +59,14 @@ def compound_events_analysis(cfg, region, plotStations=False):
     else:
         swe=""
 
+    bootstrap_res = {}
     if reGen:
         xds = None
         daterng = pd.date_range(start=cfg.data.start_date, end=cfg.data.end_date, freq='1D')
         threshold = cfg.data.cutoff_treshold #means tolerate 10% missing data during study period
         #print ("stationid,lat,lon,river,area,data_coverage")
         allEvents = {}
+        icounter=0
         for ix, row in dfStation.iterrows():
             stationID = row['grdc_no']
             riverName = row['river_x']
@@ -104,8 +121,49 @@ def compound_events_analysis(cfg, region, plotStations=False):
                         basinTWS = removeClimatology(basinTWS, varname='TWS',plotting=False)
                         basinP = removeClimatology(basinP, varname='P',plotting=False)
 
+                    #12232023, implemented bootstrapping
+                    nRZ  = cfg.event.bootstrap_rz
+                    bbs = doBlockBS(basinTWS, basinP, daQ, nRZ=nRZ)
                     resDict = getCompoundEvents(cfg, daQ, basinP, basinTWS, basinFPI)
-                    
+                    print ('original', resDict['TWS'], resDict['P'])
+                    TWS_Q_BS = [] 
+                    P_Q_BS = []
+                    if cfg.event.regen:
+                        for irz in range(nRZ):
+                            bsdata = bbs.bsResult[irz]
+                            daTWS_bs = basinTWS.copy()
+                            daTWS_bs.values = bsdata[:,0]
+                            daQ_bs = daQ.copy()
+                            daQ_bs.values = bsdata[:,1]
+                            daP_bs = basinP.copy()
+                            daP_bs.values = bsdata[:,2]
+                            resDict_bs = getCompoundEvents(cfg, daQ_bs, daP_bs, daTWS_bs, basinFPI)
+                            print (resDict_bs['TWS'], resDict_bs['P'])
+                            TWS_Q_BS.append(resDict_bs['TWS'])
+                            P_Q_BS.append(resDict_bs['P'])
+                        #save BS results
+                        TWS_Q_BS = np.array(TWS_Q_BS)
+                        P_Q_BS = np.array(P_Q_BS)
+                        pkl.dump([TWS_Q_BS, P_Q_BS], open(f'grdcresults/{region}_{stationID}_{cfg.event.event_method}_all_events{swe}.pkl', 'wb'))
+                    else:
+                        TWS_Q_BS, P_Q_BS = pkl.load(open(f'grdcresults/{region}_{stationID}_{cfg.event.event_method}_all_events{swe}.pkl', 'rb'))
+
+                    TWS_Q_ecdf = ECDF(TWS_Q_BS, side='right')
+                    P_Q_ecdf = ECDF(P_Q_BS, side='right')
+                    print (stationID, 'TWS', resDict['TWS'], TWS_Q_ecdf(resDict['TWS']), TWS_Q_ecdf(resDict['TWS'])>=0.95)
+                    print (stationID, 'P', resDict['P'], P_Q_ecdf(resDict['P']), P_Q_ecdf(resDict['P'])>=0.95)
+                    if TWS_Q_ecdf(resDict['TWS'])>=0.95:
+                        icounter+=1
+                    bootstrap_res[stationID] = {'TWS':TWS_Q_ecdf(resDict['TWS']), 'P':P_Q_ecdf(resDict['P'])}
+                    # fig,axes = plt.subplots(2,1)
+                    # axes[0].plot(TWS_Q_ecdf.x,TWS_Q_ecdf.y, linestyle="--", color="peru")            
+                    # axes[1].plot(P_Q_ecdf.x,P_Q_ecdf.y, linestyle="--", color="g")            
+                    # plt.savefig(f'testecdf{stationID}.png')
+                    # plt.close()
+                    # icounter+=1
+                    # if icounter>10:
+                    #     sys.exit()
+
                     if plotStations:
                         #as0715, generate station event plots
                         fig = plt.figure(figsize=(8,6))
@@ -152,10 +210,13 @@ def compound_events_analysis(cfg, region, plotStations=False):
                     allEvents[stationID] = resDict       
             except Exception as e: 
                 raise Exception (e)
+        print ('number of significants', icounter)
+        pkl.dump(bootstrap_res,  open(f'grdcresults/{region}_{cfg.event.event_method}_bootstrap_{swe}.pkl', 'wb'))
         if not cfg.data.deseason:
             pkl.dump(allEvents, open(f'grdcresults/{region}_{cfg.event.event_method}_all_events{swe}.pkl', 'wb'))             
         else:
             pkl.dump(allEvents, open(f'grdcresults/{region}_{cfg.event.event_method}_all_events_noseason{swe}.pkl', 'wb'))             
+
     else:
         if not cfg.data.deseason:
             allEvents = pkl.load(open(f'grdcresults/{region}_{cfg.event.event_method}_all_events{swe}.pkl', 'rb'))   
@@ -191,6 +252,29 @@ def getUniformProb(nYear, period=365):
     print ('prob ', np.mean(np.array(cooccur)), np.std(np.array(cooccur)))
     #for 18 years, prob  0.05208983333333336 0.0524393641992973
     #for 16 years, this print out prob  0.051972375 0.055471181025460184
+
+def getRandomOccurrenceProbPerYear(low=1, high=365, win_t = 10, nYears=16):
+    """Get probability of co-occurrence in any year
+    Ref: A. Couasnon et al.: Compound flood potential from river discharge and storm surge extremes 
+    """
+    from scipy.stats import binom
+
+    rng = np.random.default_rng(seed=122023)            
+    nRep = 1000000 # 1000000
+    T1 = rng.integers(low=low, high=high+1, size=nRep)
+    T2 = rng.integers(low=low, high=high+1, size=nRep)
+
+    nEvent=0
+    for t1,t2 in zip(T1,T2):
+        if abs(t1-t2)<=win_t:
+            nEvent+=1
+    p_cooccur = nEvent/nRep
+    print ('Prob of co-occurrence in any year', p_cooccur)
+    
+    for k in range(nYears):
+        #P(X>k)
+        P = binom.cdf(k=k, n=nYears, p=p_cooccur)
+        print (f'Prob of {k} co-occurrence in {nYears} years',P, 1-P)
 
 def glofas_compound_events_analysis(cfg, region):
     if cfg.data.removeSWE:
@@ -715,14 +799,10 @@ def glofas_compound_events_analysis_global_new(cfg):
 
 
 if __name__ == '__main__':    
-    """
-    itask =1, generate CSR.5d, GRDC compound event analysis (P, TWS, and Q) data for plotting Figure 1 
-    itask =2, generate CSR.5d, Glofas compound event analysis data
-    """
     from myutils import load_config
     config = load_config('config.yaml')
     
-    itask = 1
+    itask = 7
     if itask ==0:
         #do bootstrapping
         getUniformProb(nYear=18)
@@ -730,7 +810,7 @@ if __name__ == '__main__':
     elif itask == 1:
         #do compound event analysis for grdc [for Figure 1]
         for region in config.data.regions:
-            compound_events_analysis(cfg=config, region=region, plotStations=True)
+            compound_events_analysis(cfg=config, region=region, plotStations=False)
     elif itask == 2:
         #do compound event analysis for glofas [this is not used anymore]
         glofas_compound_events_analysis(cfg=config, region="north_america")
@@ -780,3 +860,5 @@ if __name__ == '__main__':
     elif itask == 6:
         #09102023, this is used to generate results from glofas_all_new.py
         glofas_compound_events_analysis_global_new(config)
+    elif itask == 7:
+        getRandomOccurrenceProbPerYear(win_t=10, low=1, high=365, nYears=16)
